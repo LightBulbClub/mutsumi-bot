@@ -30,7 +30,10 @@ async def waifu(msg: Bot.MessageSession, change: bool):
     db = await TodayWifeInfo.get_or_none(sender_id=_id)
     wife_now = None
     if db:
-        wife_now = db.wife_name
+        if db.timestamp.date != datetime.date:
+            db = None
+        else:
+            wife_now = db.wife_name
     if change or not db:
         if await TodayWifeInfo.get_wife(sender_id=_id, name=chose):
             await msg.finish([I18NContext("wife.message.success"), Plain(chose.split('.')[0]), Image(assets / chose)])
