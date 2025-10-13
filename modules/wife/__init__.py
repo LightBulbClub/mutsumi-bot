@@ -23,7 +23,8 @@ assets = assets_path / "modules" / "wife"
 wife_names = os.listdir(assets)
 
 
-async def waifu(msg: Bot.MessageSession, change: bool):
+async def waifu(msg: Bot.MessageSession, change_: bool):
+    change = change_
     _id = msg.session_info.sender_id
     random.seed(_id + str(datetime.now()))
     chose = random.sample(wife_names, 1)[0]
@@ -31,7 +32,7 @@ async def waifu(msg: Bot.MessageSession, change: bool):
     wife_now = None
     if db:
         if db.timestamp.date != datetime.date:
-            db = None
+            change = True
         else:
             wife_now = db.wife_name
     if change or not db:
