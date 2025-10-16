@@ -23,10 +23,10 @@ from core.database.models import AnalyticsData
 from core.exports import exports
 from core.loader import ModulesManager
 from core.logger import Logger
-from core.tos import _abuse_warn_target
+from core.tos import abuse_warn_target
 from core.types import Module, Param
 from core.types.module.component_meta import CommandMeta
-from core.utils.message import remove_duplicate_space
+from core.utils.message import normalize_space
 from core.utils.temp import TempCounter
 
 if TYPE_CHECKING:
@@ -87,7 +87,7 @@ async def parser(msg: "Bot.MessageSession"):
         await SessionTaskManager.check(msg)
         modules = ModulesManager.return_modules_list(msg.session_info.target_from, msg.session_info.client_name)
 
-        msg.trigger_msg = remove_duplicate_space(msg.as_display())  # 将消息转换为一般显示形式
+        msg.trigger_msg = normalize_space(msg.as_display())  # 将消息转换为一般显示形式
         if len(msg.trigger_msg) == 0:
             return
         if msg.session_info.sender_info.blocked and \
@@ -524,7 +524,7 @@ async def _check_temp_ban(msg: "Bot.MessageSession"):
             if is_temp_banned["count"] < 2:
                 is_temp_banned["count"] += 1
                 await msg.finish(I18NContext("tos.message.tempbanned", ban_time=int(TOS_TEMPBAN_TIME - ban_time)))
-            elif is_temp_banned["count"] <= 5:
+            elif is_temp_banned["count"] <= 3:
                 is_temp_banned["count"] += 1
                 await msg.finish(
                     I18NContext("tos.message.tempbanned.warning", ban_time=int(TOS_TEMPBAN_TIME - ban_time)))
@@ -656,7 +656,7 @@ async def _execute_module_command(msg: "Bot.MessageSession", module, command_fir
 
 async def _process_tos_abuse_warning(msg: "Bot.MessageSession", e: AbuseWarning):
     if enable_tos and Config("tos_warning_counts", 5) >= 1 and not msg.check_super_user():
-        await _abuse_warn_target(msg, str(e))
+        await abuse_warn_target(msg, str(e))
         temp_ban_counter[msg.session_info.sender_id] = {"count": 1,
                                                         "ts": datetime.now().timestamp()}
     else:

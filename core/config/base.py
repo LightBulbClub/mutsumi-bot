@@ -28,6 +28,8 @@ class Config:
     enable_analytics: bool = True
     enable_commit_url: bool = True
     enable_dirty_check: bool = False
+    check_use_textscan_v1: bool = False
+    enable_db: bool = False
     enable_eval: bool = False
     enable_urlmanager: bool = False
     auto_purge_crontab: str = "0 0 * * *"
@@ -55,7 +57,7 @@ class Config:
     enable_joke: bool = True
     shuffle_rate: float = 0.1
     enable_rickroll: bool = True
-    rickroll_msg: str = ""
+    rickroll_msg: str = "https://b23.tv/vXaKjqJ"
 
     # 外部链接
     bug_report_url: str = "https://s.wd-ljt.com/botreportbug"
