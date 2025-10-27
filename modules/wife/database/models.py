@@ -25,7 +25,7 @@ class TodayWifeInfo(DBModel):
 
     @classmethod
     async def get_wife(cls, sender_id: str, name: str):
-        info = await cls.get_or_create(sender_id=sender_id)[0]
+        info = (await cls.get_or_create(sender_id=sender_id))[0]
         info.wife_name = name
         await info.save()
         return True
