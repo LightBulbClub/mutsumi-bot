@@ -15,27 +15,23 @@ assets = assets_path / "modules" / "tarot"
 
 sum_file = assets_path / "modules" / "tarot" / "tarot_cards.json"
 
+
 @trt.command("{幻星集塔罗}")
 async def tarot(msg: Bot.MessageSession):
-    cards:list[dict] = orjson.loads(sum_file.read_text())
+    cards: list[dict] = orjson.loads(sum_file.read_text())
     utc_8 = datetime.now(ZoneInfo("Asia/Shanghai"))
     date_str = utc_8.strftime("/%y/%m%d")
     user_name = msg.session_info.sender_name
     userseed = hash(date_str + user_name)
     random.seed(userseed)
-    pn = random.randint(0,1)
-    your_card:dict = random.sample(cards, 1)[0]
-    image = PImage.open(assets / your_card.get('imageName'))
-    send1 = await msg.send_message(
+    pn = random.randint(0, 1)
+    your_card: dict = random.sample(cards, 1)[0]
+    image = PImage.open(assets / your_card.get("imageName"))
+    await msg.send_message(
         [
-            Plain(your_card.get('name')),
-            Plain('正位' if pn == 1 else '逆位'),
-            Plain(your_card.get('positive' if pn == 1 else 'negative')),
-            Plain('[90秒后撤回]')
+            Plain(your_card.get("name")),
+            Plain("正位" if pn == 1 else "逆位"),
+            Plain(your_card.get("positive" if pn == 1 else "negative")),
         ]
     )
-    send2 = await msg.send_message(Image(image if pn == 1 else image.rotate(180)),quote=False)
-    await msg.sleep(90)
-    await send1.delete()
-    await send2.delete()
-
+    await msg.send_message(Image(image if pn == 1 else image.rotate(180)), quote=False)

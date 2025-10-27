@@ -13,30 +13,19 @@ class TodayWifeInfo(DBModel):
 
     :param sender_id: 用户 ID。
     :param wife_name: 随机的老婆名。
-    :param count: 换老婆次数。
     :param timestamp: 时间戳。
     """
+
     sender_id = fields.CharField(max_length=512, pk=True)
     wife_name = fields.CharField(max_length=512)
-    count = fields.IntField()
-    timestamp = fields.DatetimeField(null=True, auto_now_add=True)
+    timestamp = fields.DatetimeField(auto_now_add=True)
 
     class Meta:
         table = f"{table_prefix}info"
 
     @classmethod
     async def get_wife(cls, sender_id: str, name: str):
-        exist_info = await cls.get_or_none(sender_id=sender_id)
-        if exist_info and exist_info.timestamp.date() != datetime.now().date():
-            await exist_info.delete()
-        elif exist_info and exist_info.count < 5:
-            exist_info.count += 1
-            exist_info.wife_name = name
-            await exist_info.save()
-            return True
-        elif exist_info and exist_info.count == 5:
-            return False
-        new_info = (await cls.get_or_create(sender_id=sender_id, wife_name=name, count=0))[0]
-        await new_info.save()
+        info = await cls.get_or_create(sender_id=sender_id)[0]
+        info.wife_name = name
+        await info.save()
         return True
-

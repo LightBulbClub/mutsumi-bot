@@ -53,7 +53,7 @@ tenacity = "^9.0.0"
 tomlkit = "^0.13.2"
 
 # core.database
-tortoise-orm = {extras = ["asyncmy"], version = "^0.25.0"}
+tortoise-orm = {extras = [""], version = "^0.25.0"}
 
 # core.http
 aiofile = "^3.8.1"
@@ -112,6 +112,8 @@ aggressive = 3
 
 [tool.pyright]
 reportUndefinedVariable = "error"
+venvPath = "."
+venv = ".venv"
 
 [[tool.poetry.source]]
 name = "tsinghua"
