@@ -21,7 +21,7 @@ class TodayWifeInfo(DBModel):
     timestamp = fields.DatetimeField(auto_now=True)
 
     class Meta:
-        table = f"{table_prefix}info"
+        table = f"{table_prefix}newinfo"
 
     @classmethod
     async def get_wife(cls, sender_id: str, name: str):
