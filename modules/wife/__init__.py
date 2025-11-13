@@ -1,12 +1,13 @@
+import os
+import random
+from datetime import datetime
+
 from core.builtins.bot import Bot
 from core.builtins.message.internal import I18NContext, Image, Plain
 from core.component import module
 from core.constants.path import assets_path
-from .database.models import TodayWifeInfo
 
-from datetime import datetime
-import os
-import random
+from .database.models import TodayWifeInfo
 
 wif = module(
     "wife",
@@ -56,7 +57,7 @@ async def waifu(msg: Bot.MessageSession, change_: bool):
     )
 
 
-@wif.command("获取今日二次元老婆")
+@wif.command("{获取今日二次元老婆}")
 async def _(msg: Bot.MessageSession):
     await waifu(msg, False)
 
