@@ -1,11 +1,13 @@
+import os
+import random
+from datetime import datetime
+
 from core.builtins.bot import Bot
 from core.builtins.message.internal import I18NContext, Image, Plain
 from core.component import module
 from core.constants.path import assets_path
+
 from .database.models import TodayHusbandInfo
-from datetime import datetime
-import os
-import random
 
 hsb = module(
     "husband",
@@ -31,7 +33,7 @@ async def waifu(msg: Bot.MessageSession, change_: bool):
         else:
             wife_now = db.wife_name
     if change or not db:
-        if await TodayHusbandInfo.get_wife(sender_id=_id, name=chose):
+        if await TodayHusbandInfo.get_husband(sender_id=_id, name=chose):
             await msg.finish(
                 [
                     Plain("成功！你今天的老公是"),
@@ -55,7 +57,7 @@ async def waifu(msg: Bot.MessageSession, change_: bool):
     )
 
 
-@hsb.command("获取今日二次元老公")
+@hsb.command("{获取今日二次元老公}")
 async def _(msg: Bot.MessageSession):
     await waifu(msg, False)
 
