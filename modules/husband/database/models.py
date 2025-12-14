@@ -18,7 +18,7 @@ class TodayHusbandInfo(DBModel):
 
     sender_id = fields.CharField(max_length=512, pk=True)
     husband_name = fields.CharField(max_length=512, null=True)
-    timestamp = fields.DatetimeField(auto_now=True)
+    timestamp = fields.DatetimeField(auto_now_add=True)
 
     class Meta:
         table = f"{table_prefix}info"
