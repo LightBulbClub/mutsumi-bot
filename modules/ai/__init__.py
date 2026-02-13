@@ -1,10 +1,10 @@
 from core.builtins.bot import Bot
 from core.builtins.message.internal import I18NContext, Plain
 from core.component import module
+from core.cooldown import CoolDown
 from core.config import Config
 from core.dirty_check import check_bool, rickroll
 from core.logger import Logger
-from core.utils.cooldown import CoolDown
 from .llm import ask_llm
 from .petal import precount_petal, count_token_petal
 from .setting import llm_api_list, llm_list, llm_su_list
@@ -19,9 +19,9 @@ ai = module("ai",
             exclude_from="QQBot")
 
 
-@ai.command("<question> [--llm <llm>] {{I18N:ai.help}}",
+@ai.command("<prompt> [--llm <llm>] {{I18N:ai.help}}",
             options_desc={"--llm": "{I18N:ai.help.option.llm}"})
-async def _(msg: Bot.MessageSession, question: str):
+async def _(msg: Bot.MessageSession, prompt: str):
     get_llm = msg.parsed_msg.get("--llm", False)
     llm = get_llm["<llm>"].lower() if get_llm else None
     target_llm = msg.session_info.target_info.target_data.get("ai_default_llm")
@@ -40,13 +40,13 @@ async def _(msg: Bot.MessageSession, question: str):
         if not is_superuser and not precount_petal(msg, llm_info["price_in"], llm_info["price_out"]):
             await msg.finish(I18NContext("petal.message.cost.not_enough"))
 
-        if await check_bool(question, msg):
+        if await check_bool(prompt, msg):
             await msg.finish(rickroll())
 
         qc = CoolDown("call_ai", msg, 60)
         c = qc.check()
         if c == 0 or is_superuser:
-            chain, input_tokens, output_tokens = await ask_llm(question, llm_info["model_name"], llm_info["api_url"],
+            chain, input_tokens, output_tokens = await ask_llm(prompt, llm_info["model_name"], llm_info["api_url"],
                                                                llm_info["api_key"], session=msg)
 
             Logger.info(f"{input_tokens + output_tokens} tokens used while calling AI.")
@@ -65,7 +65,7 @@ async def _(msg: Bot.MessageSession, question: str):
         await msg.finish(I18NContext("ai.message.llm.invalid"))
 
 
-@ai.command("set <llm> {{I18N:ai.help.set}}", required_admin=True)
+@ai.command("llm set <llm> {{I18N:ai.help.set}}", required_admin=True)
 async def _(msg: Bot.MessageSession, llm: str):
     llm = llm.lower()
     if llm in llm_list:
@@ -75,7 +75,7 @@ async def _(msg: Bot.MessageSession, llm: str):
         await msg.finish(I18NContext("ai.message.llm.invalid"))
 
 
-@ai.command("list {{I18N:ai.help.list}}")
+@ai.command("llm list {{I18N:ai.help.list}}")
 async def _(msg: Bot.MessageSession):
     avaliable_llms = llm_list + (llm_su_list if msg.check_super_user() else [])
 

@@ -1,6 +1,6 @@
 import asyncio
 from abc import ABC, abstractmethod
-from typing import Any, Optional, Union, List
+from typing import Any
 
 from core.builtins.message.chain import MessageChain, MessageNodes
 from core.builtins.session.features import Features
@@ -10,7 +10,7 @@ from core.logger import Logger
 
 class ContextManager(ABC):
     context: dict[str, Any] = {}
-    features: Optional[Features] = Features
+    features: Features | None = Features
     typing_flags: dict[str, asyncio.Event] = {}
     context_marks_hold: dict[str, int] = {}
 
@@ -72,7 +72,7 @@ class ContextManager(ABC):
                            quote: bool = True,
                            enable_parse_message: bool = True,
                            enable_split_image: bool = True,
-                           ) -> List[str]:
+                           ) -> list[str]:
         """
         发送消息到指定的会话。
 
@@ -91,12 +91,13 @@ class ContextManager(ABC):
 
     @classmethod
     @abstractmethod
-    async def delete_message(cls, session_info: SessionInfo, message_id: Union[str, List[str]]) -> None:
+    async def delete_message(cls, session_info: SessionInfo, message_id: str | list[str], reason: str | None = None) -> None:
         """
-        删除指定会话中的消息。
+        删除指定会话中的消息，可能需要该会话的管理员权限。
 
         :param session_info: 会话信息
         :param message_id: 消息 ID 列表（为最大兼容，请将元素转换为str，若实现需要传入其他类型再在下方另行实现）
+        :param reason: 原因（可选）
         """
         if isinstance(message_id, str):
             message_id = [message_id]
@@ -110,7 +111,106 @@ class ContextManager(ABC):
 
     @classmethod
     @abstractmethod
-    async def add_reaction(cls, session_info: SessionInfo, message_id: Union[str, List[str]], emoji: str) -> None:
+    async def restrict_member(cls, session_info: SessionInfo, user_id: str | list[str], duration: int | None = None, reason: str | None = None) -> None:
+        """
+        禁言指定会话中的成员，可能需要该会话的管理员权限。
+
+        :param session_info: 会话信息
+        :param user_id: 用户 ID
+        :param duration: 禁言时长
+        :param reason: 原因（可选）
+        """
+        if isinstance(user_id, str):
+            user_id = [user_id]
+        if not isinstance(user_id, list):
+            raise TypeError("User ID must be a list or str")
+
+        if session_info.session_id not in cls.context:
+            raise ValueError("Session not found in context")
+
+        raise NotImplementedError  # 请继承 class 后实现方法
+
+    @classmethod
+    @abstractmethod
+    async def unrestrict_member(cls, session_info: SessionInfo, user_id: str | list[str]) -> None:
+        """
+        解除禁言指定会话中的成员，可能需要该会话的管理员权限。
+
+        :param session_info: 会话信息
+        :param user_id: 用户 ID
+        """
+        if isinstance(user_id, str):
+            user_id = [user_id]
+        if not isinstance(user_id, list):
+            raise TypeError("User ID must be a list or str")
+
+        if session_info.session_id not in cls.context:
+            raise ValueError("Session not found in context")
+
+        raise NotImplementedError  # 请继承 class 后实现方法
+
+    @classmethod
+    @abstractmethod
+    async def kick_member(cls, session_info: SessionInfo, user_id: str | list[str], reason: str | None = None) -> None:
+        """
+        踢出指定会话中的成员，可能需要该会话的管理员权限。
+
+        :param session_info: 会话信息
+        :param user_id: 用户 ID
+        :param reason: 原因（可选）
+        """
+        if isinstance(user_id, str):
+            user_id = [user_id]
+        if not isinstance(user_id, list):
+            raise TypeError("User ID must be a list or str")
+
+        if session_info.session_id not in cls.context:
+            raise ValueError("Session not found in context")
+
+        raise NotImplementedError  # 请继承 class 后实现方法
+
+    @classmethod
+    @abstractmethod
+    async def ban_member(cls, session_info: SessionInfo, user_id: str | list[str], reason: str | None = None) -> None:
+        """
+        封禁指定会话中的成员，可能需要该会话的管理员权限。
+
+        :param session_info: 会话信息
+        :param user_id: 用户 ID
+        :param reason: 原因（可选）
+        """
+        if isinstance(user_id, str):
+            user_id = [user_id]
+        if not isinstance(user_id, list):
+            raise TypeError("User ID must be a list or str")
+
+        if session_info.session_id not in cls.context:
+            raise ValueError("Session not found in context")
+
+        raise NotImplementedError  # 请继承 class 后实现方法
+
+    @classmethod
+    @abstractmethod
+    async def unban_member(cls, session_info: SessionInfo, user_id: str | list[str]) -> None:
+        """
+        解除封禁指定会话中的成员，可能需要该会话的管理员权限。
+
+        :param session_info: 会话信息
+        :param user_id: 用户 ID
+        """
+        if isinstance(user_id, str):
+            user_id = [user_id]
+        if not isinstance(user_id, list):
+            raise TypeError("User ID must be a list or str")
+
+        if session_info.session_id not in cls.context:
+            raise ValueError("Session not found in context")
+
+        raise NotImplementedError  # 请继承 class 后实现方法
+
+    @classmethod
+    @abstractmethod
+    async def add_reaction(cls, session_info: SessionInfo, message_id: str | list[str], emoji: str) -> None:
         """
         为指定消息添加反应。
 
@@ -130,7 +230,7 @@ class ContextManager(ABC):
 
     @classmethod
     @abstractmethod
-    async def remove_reaction(cls, session_info: SessionInfo, message_id: Union[str, List[str]], emoji: str) -> None:
+    async def remove_reaction(cls, session_info: SessionInfo, message_id: str | list[str], emoji: str) -> None:
         """
         为指定消息删除反应。
 

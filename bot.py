@@ -1,25 +1,27 @@
+from core import check_python_version  # noqa
+check_python_version()  # noqa
+
 import asyncio
 import importlib
 import multiprocessing
 import os
 import shutil
 import sys
+import time
 import traceback
-from datetime import datetime
 from pathlib import Path
-from time import sleep
 
 from loguru import logger
 from tortoise import Tortoise, run_async
-from tortoise.exceptions import ConfigurationError
 
-from core.constants import config_path, config_filename, logs_path
+from core.constants import bots_path, config_path, config_filename, logs_path
+from core.database import close_db
+
 
 # Capture the base import lists to avoid clearing essential modules when restarting
 base_import_lists = list(sys.modules)
 
 # Basic logger setup
-
 try:
     logger.remove(0)
 except ValueError:
@@ -34,11 +36,12 @@ logger_format = (
     "<level>[{level}]:{message}</level>"
 )
 Logger.add(
-    sys.stderr,
+    sys.stdout,
     format=logger_format,
     colorize=True,
     filter=lambda record: record["extra"].get("name") == "BotDaemon"
 )
+
 Logger.add(
     sink=logs_path / "BotDaemon_debug_{time:YYYY-MM-DD}.log",
     format=logger_format,
@@ -67,16 +70,6 @@ ascii_art = r"""
  /_/    \_\_|\_\__,_|_|  |_| |____/ \___/ \__|
 """
 encode = "UTF-8"
-
-bots_and_required_configs = {
-    "aiocqhttp": ["qq_host"],
-    "discord": ["discord_token"],
-    "aiogram": ["telegram_token"],
-    "kook": ["kook_token"],
-    "matrix": ["matrix_homeserver", "matrix_user", "matrix_device_id", "matrix_token"],
-    "qqbot": ["qq_bot_appid", "qq_bot_secret"],
-    "web": [],
-}
 
 
 class RestartBot(Exception):
@@ -116,18 +109,18 @@ def pre_init():
         if not query_dbver:
             from core.scripts.convert_database import convert_database
 
-            await Tortoise.close_connections()
+            await close_db()
             await convert_database()
             Logger.success("Database converted successfully!")
-        elif (current_ver := query_dbver.version) < (target_ver := database_version):
-            Logger.info(f"Updating database from {current_ver} to {target_ver}...")
+        elif query_dbver.version < database_version:
+            Logger.info(f"Updating database from {query_dbver.version} to {database_version}...")
             from core.database.update import update_database
 
-            await Tortoise.close_connections()
+            await close_db()
             await update_database()
             Logger.success("Database updated successfully!")
         else:
-            await Tortoise.close_connections()
+            await close_db()
 
         base_superuser = Config(
             "base_superuser", base_superuser_default, cfg_type=(str, list)
@@ -161,7 +154,7 @@ def multiprocess_run_until_complete(func):
     while True:
         if not p.is_alive():
             break
-        sleep(1)
+        time.sleep(1)
     terminate_process(p)
 
 
@@ -190,21 +183,22 @@ binary_mode = not sys.argv[0].endswith(".py")
 
 
 async def run_bot():
+    from dotenv import load_dotenv  # noqa
     from core.config import CFGManager  # noqa
     from core.server.run import run_async as server_run_async  # noqa
 
     def restart_bot_process(bot_name: str):
         if (
                 bot_name not in failed_to_start_attempts
-                or datetime.now().timestamp()
+                or time.time()
                 - failed_to_start_attempts[bot_name]["timestamp"]
                 > 60
         ):
             failed_to_start_attempts[bot_name] = {}
             failed_to_start_attempts[bot_name]["count"] = 0
-            failed_to_start_attempts[bot_name]["timestamp"] = datetime.now().timestamp()
+            failed_to_start_attempts[bot_name]["timestamp"] = time.time()
         failed_to_start_attempts[bot_name]["count"] += 1
-        failed_to_start_attempts[bot_name]["timestamp"] = datetime.now().timestamp()
+        failed_to_start_attempts[bot_name]["timestamp"] = time.time()
         if failed_to_start_attempts[bot_name]["count"] >= 3:
             Logger.error(
                 f"Bot {bot_name} failed to start 3 times, abort to restart, please check the log."
@@ -221,35 +215,25 @@ async def run_bot():
         p.start()
         processes.append(p)
 
+    load_dotenv()
     envs = os.environ.copy()
-    envs["PYTHONIOENCODING"] = "UTF-8"
+    envs["PYTHONIOENCODING"] = encode
     envs["PYTHONPATH"] = Path(".").resolve()
-    lst = bots_and_required_configs.keys()
+    bots_list = [p.name for p in bots_path.iterdir() if p.is_dir() and not p.name.startswith("_")]
 
     for t in CFGManager.values:
-        if t.startswith("bot_") and not t.endswith("_secret"):
+        if t.startswith("bot_") and not t.endswith("_secret") and t[4:] in bots_list:
             if "enable" in CFGManager.values[t][t]:
                 if not CFGManager.values[t][t]["enable"]:
                     disabled_bots.append(t[4:])
                     Logger.warning(f"Bot {t[4:]} is disabled in config, skip to launch.")
             else:
-                Logger.warning(f"Bot {t} cannot found config \"enable\".")
+                Logger.warning(f"Bot {t[4:]} cannot found config \"enable\".")
                 disabled_bots.append(t[4:])
 
-    for bl in lst:
+    for bl in bots_list:
         if bl in disabled_bots:
             continue
-        if bl in bots_and_required_configs:
-            abort = False
-            for c in bots_and_required_configs[bl]:
-                if not CFGManager.get(c, _global=True):
-                    Logger.error(
-                        f"Bot {bl} requires config \"{c}\" but not found, abort to launch."
-                    )
-                    abort = True
-                    break
-            if abort:
-                continue
         p = multiprocessing.Process(
             target=go, args=(bl, True, binary_mode), name=bl, daemon=True
         )
@@ -288,8 +272,6 @@ async def run_bot():
                     f"Process {p.pid} ({p.name}) exited with code 233, restart all bots."
                 )
                 raise RestartBot
-            if p.exitcode == 466:
-                break
             Logger.critical(
                 f"Process {p.pid} ({p.name}) exited with code {p.exitcode}, please check the log."
             )
@@ -313,7 +295,6 @@ def terminate_process(process: multiprocessing.Process):
 async def main_async():
     if not (config_path / config_filename).exists():
         import core.scripts.config_generate  # noqa
-    from core.config import Config  # noqa
 
     try:
         multiprocess_run_until_complete(pre_init)
@@ -323,12 +304,7 @@ async def main_async():
             Logger.warning(f"Terminating process {ps.pid} ({ps.name})...")
             terminate_process(ps)
         processes.clear()
-        try:
-            await Tortoise.close_connections()
-        except ConfigurationError:
-            pass
         raise e
-
     except (KeyboardInterrupt, SystemExit) as e:
         for ps in processes:
             terminate_process(ps)
@@ -339,10 +315,7 @@ async def main_async():
         traceback.print_exc()
         raise e
     finally:
-        try:
-            await Tortoise.close_connections()
-        except ConfigurationError:
-            pass
+        await close_db()
 
 
 def main():
@@ -357,15 +330,6 @@ def main():
 
 
 if __name__ == "__main__":
-    # Check Python version
-    required_version = (3, 12)
-    if sys.version_info < required_version:
-        Logger.critical(
-            f"Your Python version is {sys.version_info.major}.{sys.version_info.minor}, "
-            f"and you need Python {required_version[0]}.{required_version[1]} or higher."
-        )
-        sys.exit(1)
-
     # Detect if the program is already running
     lock_file_path = Path("./.bot.lock").resolve()
     if sys.platform == "win32":

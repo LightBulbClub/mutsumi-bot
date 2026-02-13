@@ -1,5 +1,5 @@
 import platform
-from datetime import datetime
+import time
 
 import psutil
 from cpuinfo import get_cpu_info
@@ -10,9 +10,8 @@ from core.builtins.message.internal import Plain, FormattedTime, I18NContext, Ur
 from core.component import module
 from core.config import Config
 from core.constants.default import locale_url_default
-from core.i18n import get_available_locales, Locale, load_locale_file
+from core.i18n import get_available_locales, Locale
 from core.utils.bash import run_sys_command
-from core.utils.temp import TempCounter
 
 ver = module("version", base=True, doc=True)
 
@@ -20,14 +19,29 @@ ver = module("version", base=True, doc=True)
 @ver.command("{{I18N:core.help.version}}")
 async def _(msg: Bot.MessageSession):
     if Bot.Info.version:
-        commit = Bot.Info.version[:6]
-        send_msgs = MessageChain.assign([I18NContext("core.message.version", commit=commit, disable_joke=True)])
-        if Config("enable_commit_url", True):
-            returncode, repo_url, _ = await run_sys_command(["git", "config", "--get", "remote.origin.url"])
-            if returncode == 0:
-                repo_url = repo_url.strip().replace(".git", "")
-                commit_url = f"{repo_url}/commit/{commit}"
-                send_msgs.append(Url(commit_url, use_mm=False))
+        if str(Bot.Info.version).startswith("git:"):
+            commit = Bot.Info.version[4:11]
+            send_msgs = MessageChain.assign(I18NContext("core.message.version", version=commit, disable_joke=True))
+            if Config("enable_commit_url", True):
+                returncode, repo_url, _ = await run_sys_command(["git", "config", "--get", "remote.origin.url"])
+                if returncode == 0:
+                    repo_url = repo_url.strip().replace(".git", "")
+                    commit_url = f"{repo_url}/commit/{commit}"
+                    send_msgs.append(Url(commit_url, use_mm=False))
+        else:
+            version = Bot.Info.version
+            send_msgs = MessageChain.assign(
+                I18NContext(
+                    "core.message.version",
+                    version=version,
+                    disable_joke=True))
+            if Config("enable_commit_url", True):
+                version = "nightly" if version.startswith("nightly") else version
+                returncode, repo_url, _ = await run_sys_command(["git", "config", "--get", "remote.origin.url"])
+                if returncode == 0:
+                    repo_url = repo_url.strip().replace(".git", "")
+                    commit_url = f"{repo_url}/releases/tag/{version}"
+                    send_msgs.append(Url(commit_url, use_mm=False))
         await msg.finish(send_msgs)
     else:
         await msg.finish(I18NContext("core.message.version.unknown"))
@@ -35,19 +49,21 @@ async def _(msg: Bot.MessageSession):
 
 ping = module("ping", base=True, doc=True)
 
-started_time = datetime.now()
+started_time = time.time()
 
 
 @ping.command("{{I18N:core.help.ping}}")
 async def _(msg: Bot.MessageSession):
     result = MessageChain.assign(Plain("Pong!"))
-    timediff = str(datetime.now() - started_time).split(".")[0]
+
+    td_seconds = time.time() - started_time
+    timediff = f"{int(td_seconds // 3600):02d}:{int((td_seconds % 3600) // 60):02d}:{int(td_seconds % 60):02d}"
+    cpu_percent = psutil.cpu_percent()
+    ram_percent = psutil.virtual_memory().percent
     if msg.check_super_user():
         boot_start = str(FormattedTime(psutil.boot_time(), iso=True))
         web_render_status = str(Bot.Info.web_render_status)
-        cpu_usage = psutil.cpu_percent()
         ram = int(psutil.virtual_memory().total / (1024 * 1024))
-        ram_percent = psutil.virtual_memory().percent
         swap = int(psutil.swap_memory().total / (1024 * 1024))
         swap_percent = psutil.swap_memory().percent
         disk = int(psutil.disk_usage("/").used / (1024 * 1024 * 1024))
@@ -59,7 +75,7 @@ async def _(msg: Bot.MessageSession):
             python_version=platform.python_version(),
             web_render_status=web_render_status,
             cpu_brand=get_cpu_info()["brand_raw"],
-            cpu_usage=cpu_usage,
+            cpu_percent=cpu_percent,
             ram=ram,
             ram_percent=ram_percent,
             swap=swap,
@@ -68,13 +84,15 @@ async def _(msg: Bot.MessageSession):
             disk_space_total=disk_total,
             client_name=msg.session_info.client_name,
             command_parsed=Bot.Info.command_parsed,
-            parsed=TempCounter.value,
+            parsed=Bot.Info.message_parsed,
             disable_joke=True))
     else:
         disk_percent = psutil.disk_usage("/").percent
         result.append(I18NContext(
             "core.message.ping.simple",
             bot_running_time=timediff,
+            cpu_percent=cpu_percent,
+            ram_percent=ram_percent,
             disk_percent=disk_percent,
             disable_joke=True
         ))
@@ -109,13 +127,13 @@ async def _(msg: Bot.MessageSession):
         if user in msg.session_info.custom_admins:
             await msg.finish(I18NContext("core.message.admin.add.already"))
         if await msg.session_info.target_info.config_custom_admin(user):
-            await msg.finish(I18NContext("core.message.admin.add.success", user=user))
+            await msg.finish(I18NContext("core.message.admin.add.success", sender=user))
     if "remove" in msg.parsed_msg:
         if user == msg.session_info.sender_id:
             if not await msg.wait_confirm(I18NContext("core.message.admin.remove.confirm")):
                 await msg.finish()
         if await msg.session_info.target_info.config_custom_admin(user, enable=False):
-            await msg.finish(I18NContext("core.message.admin.remove.success", user=user))
+            await msg.finish(I18NContext("core.message.admin.remove.success", sender=user))
 
 
 @admin.command(
@@ -139,10 +157,10 @@ async def _(msg: Bot.MessageSession):
         if user in msg.session_info.banned_users:
             await msg.finish(I18NContext("core.message.admin.ban.already"))
         await msg.session_info.target_info.config_banned_user(user)
-        await msg.finish(I18NContext("core.message.admin.ban.success", user=user))
+        await msg.finish(I18NContext("core.message.admin.ban.success", sender=user))
     if "unban" in msg.parsed_msg:
         if await msg.session_info.target_info.config_banned_user(user, enable=False):
-            await msg.finish(I18NContext("core.message.admin.unban.success", user=user))
+            await msg.finish(I18NContext("core.message.admin.unban.success", sender=user))
 
 
 locale = module(
@@ -171,7 +189,7 @@ async def _(msg: Bot.MessageSession, lang: str):
         await msg.finish([I18NContext("core.message.locale.set.invalid"),
                           I18NContext("core.message.locale.langlist", langlist=avaliable_lang)])
 
-
+"""
 @locale.command("reload", required_superuser=True)
 async def _(msg: Bot.MessageSession):
     err = load_locale_file()
@@ -179,7 +197,7 @@ async def _(msg: Bot.MessageSession):
         await msg.finish(I18NContext("message.success"))
     else:
         await msg.finish([I18NContext("core.message.locale.reload.failed"), Plain("\n".join(err), disable_joke=True)])
-
+"""
 
 whoami = module("whoami", base=True, doc=True)
 
@@ -286,6 +304,6 @@ leave = module(
 async def _(msg: Bot.MessageSession):
     if await msg.wait_confirm(I18NContext("core.message.leave.confirm")):
         await msg.send_message(I18NContext("core.message.leave.success"))
-        await msg.qq_call_api("set_group_leave", group_id=int(msg.session_info.get_common_target_id()))
+        await msg.call_onebot_api("set_group_leave", group_id=int(msg.session_info.get_common_target_id()))
     else:
         await msg.finish()

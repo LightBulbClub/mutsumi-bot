@@ -6,7 +6,7 @@ from core.config import Config
 from core.constants.exceptions import ConfigValueError
 from core.utils.http import get_url
 from core.utils.image_table import image_table_render, ImageTable
-from core.utils.message import is_int
+from core.utils.func import is_int
 
 enable_card = Config("ncmusic_enable_card", False, table_name="module_ncmusic")
 API = Config("ncmusic_api", cfg_type=str, secret=True, table_name="module_ncmusic")
@@ -22,7 +22,7 @@ ncmusic = module(
 
 
 @ncmusic.command(
-    "search [--legacy] <keyword> {{I18N:ncmusic.help.search}}",
+    "search <keyword> [--legacy] {{I18N:ncmusic.help.search}}",
     options_desc={"--legacy": "{I18N:help.option.legacy}"},
 )
 async def _(msg: Bot.MessageSession, keyword: str):

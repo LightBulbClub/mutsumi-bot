@@ -1,8 +1,9 @@
 import re
 import traceback
-from typing import List, Dict, Union
 
 from core.constants.exceptions import InvalidTemplatePattern, InvalidCommandFormatError
+
+MAX_NEST_DEPTH = 10
 
 
 class ArgumentPattern:
@@ -30,7 +31,7 @@ class DescPattern:
 class Template:
     def __init__(
         self,
-        args: List[Union[ArgumentPattern, "OptionalPattern", DescPattern]],
+        args: "list[ArgumentPattern | OptionalPattern | DescPattern]",
         priority: int = 1,
     ):
         self.args_ = args
@@ -48,7 +49,7 @@ class Template:
 
 
 class OptionalPattern:
-    def __init__(self, flag: str, args: List[Template]):
+    def __init__(self, flag: str, args: list[Template]):
         self.flag = flag
         self.args = args
 
@@ -65,7 +66,7 @@ class Argument:
 
 
 class Optional:
-    def __init__(self, args: Dict[str, dict], flagged=False):
+    def __init__(self, args: dict[str, dict], flagged=False):
         self.flagged = flagged
         self.args = args
 
@@ -115,60 +116,143 @@ def split_multi_arguments(lst: list):
     return list(set(new_lst))
 
 
-def parse_template(argv: List[str]) -> List[Template]:
+def parse_template(argv: list[str], depth: int = 0) -> list[Template]:
+    if depth > MAX_NEST_DEPTH:
+        raise InvalidTemplatePattern("Template nesting too deep")
+
     templates = []
     argv_ = []
+
     for a in argv:
         if isinstance(a, str):
+            a = a.strip()
+            if not a:
+                continue
             spl = split_multi_arguments([a])
             for split in spl:
                 argv_.append(split)
 
-    for a in argv_:
-        template = Template([])
-        patterns = filter(None, re.split(r"(\[.*?])|(<.*?>)|(\{.*})| ", a))
-        for p in patterns:
-            strip_pattern = p.strip()
-            if not strip_pattern:
-                continue
-            if strip_pattern.startswith("["):
-                if not strip_pattern.endswith("]"):
-                    raise InvalidTemplatePattern(p)
-                optional_patterns = strip_pattern[1:-1].split(" ")
-                flag = None
-                args = []
-                if optional_patterns[0].startswith("<"):
-                    if not optional_patterns[0].endswith(">"):
-                        raise InvalidTemplatePattern(p)
-                    args += optional_patterns
-                else:
-                    flag = optional_patterns[0]
-                    args += optional_patterns[1:]
-                template.args.append(
-                    OptionalPattern(
-                        flag=flag,
-                        args=(
-                            parse_template([" ".join(args).strip()])
-                            if len(args) > 0
-                            else []
-                        ),
+    try:
+        for a in argv_:
+            if any(x in a for x in ["<[", ">{", "{<", "[{", "{["]):
+                raise InvalidTemplatePattern(f"Illegal mixed bracket nesting: {a}")
+
+            template = Template([])
+            patterns = list(filter(None, re.split(r"(\[.*?])|(<.*?>)|(\{.*})| ", a)))
+
+            arg_names: set[str] = set()
+            last_type = None
+            seen_desc = False
+            seen_variadic = False
+
+            for p in patterns:
+                strip_pattern = p.strip()
+                if not strip_pattern:
+                    continue
+
+                if strip_pattern.startswith("["):
+                    if not strip_pattern.endswith("]"):
+                        raise InvalidTemplatePattern(f"Broken optional block: {p}")
+                    inner = strip_pattern[1:-1].strip()
+                    if not inner:
+                        raise InvalidTemplatePattern("Empty optional block [] not allowed")
+
+                    optional_patterns = inner.split(" ")
+                    flag = None
+                    args = []
+
+                    if optional_patterns[0].startswith("<"):
+                        if not optional_patterns[0].endswith(">"):
+                            raise InvalidTemplatePattern(f"Broken argument block: {p}")
+                        if not optional_patterns[0][1:-1].strip():
+                            raise InvalidTemplatePattern("Empty argument block <> not allowed")
+                        args += optional_patterns
+                    else:
+                        flag = optional_patterns[0]
+                        args += optional_patterns[1:]
+
+                    if flag and flag.startswith("{"):
+                        raise InvalidTemplatePattern(f"Optional flag cannot be description: {flag}")
+
+                    arg_names_ = set()
+                    for arg in args:
+                        if arg in arg_names_:
+                            raise InvalidTemplatePattern(
+                                f"Duplicate argument in optional flag \"{flag}\": {arg}"
+                            )
+                        arg_names_.add(arg)
+
+                    if not flag:
+                        for arg in args:
+                            if arg in arg_names:
+                                raise InvalidTemplatePattern(f"Duplicate required argument: {arg}")
+                            arg_names.add(arg)
+
+                    if last_type == "desc":
+                        raise InvalidTemplatePattern(f"Optional argument cannot follow description: {p}")
+                    if last_type == "optional_no_flag" and not flag:
+                        raise InvalidTemplatePattern(f"Two no-flag optional arguments not allowed: {p}")
+
+                    template.args.append(
+                        OptionalPattern(
+                            flag=flag,
+                            args=parse_template([" ".join(args)], depth + 1) if args else []
+                        )
                     )
-                )
-            elif strip_pattern.startswith("{"):
-                if not strip_pattern.endswith("}"):
-                    raise InvalidTemplatePattern(p)
-                template.args.append(DescPattern(strip_pattern[1:-1]))
-            else:
-                if strip_pattern.startswith("<") and not strip_pattern.endswith(">"):
-                    raise InvalidTemplatePattern(p)
-                template.args.append(ArgumentPattern(strip_pattern))
-        templates.append(template)
-    return templates
+                    last_type = "optional" if flag else "optional_no_flag"
+
+                elif strip_pattern.startswith("{"):
+                    if not strip_pattern.endswith("}"):
+                        raise InvalidTemplatePattern(f"Broken description block: {p}")
+                    if seen_desc:
+                        raise InvalidTemplatePattern(f"Multiple descriptions not allowed: {p}")
+                    seen_desc = True
+
+                    desc = strip_pattern[1:-1].strip()
+                    if not desc:
+                        raise InvalidTemplatePattern("Empty description block {} not allowed")
+
+                    template.args.append(DescPattern(desc))
+                    last_type = "desc"
+
+                else:
+                    if strip_pattern.startswith("<"):
+                        if not strip_pattern.endswith(">"):
+                            raise InvalidTemplatePattern(f"Broken argument block: {p}")
+                        if not strip_pattern[1:-1].strip():
+                            raise InvalidTemplatePattern("Empty argument block <> not allowed")
+                    if last_type in ("optional", "optional_no_flag"):
+                        raise InvalidTemplatePattern(f"Argument cannot follow optional block: {p}")
+                    if last_type == "desc":
+                        raise InvalidTemplatePattern(f"Argument cannot follow description: {p}")
+
+                    if strip_pattern in arg_names:
+                        raise InvalidTemplatePattern(f"Duplicate argument: \"{strip_pattern}\"")
+
+                    if strip_pattern == "...":
+                        if seen_variadic:
+                            raise InvalidTemplatePattern("Duplicate \"...\" not allowed")
+                        seen_variadic = True
+                        last_type = "variadic"
+                        template.args.append(ArgumentPattern("..."))
+                        continue
+
+                    arg_names.add(strip_pattern)
+                    template.args.append(ArgumentPattern(strip_pattern))
+                    last_type = "argument"
+
+            templates.append(template)
+
+        return templates
+
+    except InvalidTemplatePattern as e:
+        traceback.print_exc()
+        raise e
 
 
 def templates_to_str(
-    templates: List[Template], with_desc=False, simplify=True
-) -> List[str]:
+    templates: list[Template], with_desc=False, simplify=True
+) -> list[str]:
     text = []
     last_desc = None
     for template in templates:
@@ -209,7 +293,7 @@ def templates_to_str(
     return text
 
 
-def parse_argv(argv: List[str], templates: List["Template"]) -> MatchedResult:
+def parse_argv(argv: list[str], templates: list["Template"]) -> MatchedResult:
     matched_result = []
     for template in templates:
         try:
@@ -251,27 +335,28 @@ def parse_argv(argv: List[str], templates: List["Template"]) -> MatchedResult:
                         else:
                             parsed_argv[a.name] = False
                     elif a.name == "...":
-                        if len(args) - 1 == args.index(a):
-                            afters.append(Template([a]))
-                        else:
-                            raise InvalidTemplatePattern(
-                                "... must be the last argument"
-                            )
+                        afters.append(Template([a]))
                     else:
                         parsed_argv[a.name] = a.name in argv_copy
                         if parsed_argv[a.name]:
                             argv_copy.remove(a.name)
             if argv_copy:  # if there are still some argv left
                 if afters:
+                    ai = 1
                     for arg in afters:
+                        subi = 1
                         for sub_args in arg.args:
                             if isinstance(sub_args, ArgumentPattern):
                                 if sub_args.name.startswith("<"):
                                     if len(argv_copy) > 0:
-                                        parsed_argv[sub_args.name] = Argument(
-                                            argv_copy[0]
-                                        )
-                                        del argv_copy[0]
+                                        if len(afters) == ai and len(arg.args) == subi:  # last optional arg
+                                            parsed_argv[sub_args.name] = Argument(" ".join(argv_copy))
+                                            argv_copy.clear()
+                                        else:
+                                            parsed_argv[sub_args.name] = Argument(
+                                                argv_copy[0]
+                                            )
+                                            del argv_copy[0]
                                     else:
                                         parsed_argv[sub_args.name] = False
                                 elif sub_args.name == "...":
@@ -285,6 +370,8 @@ def parse_argv(argv: List[str], templates: List["Template"]) -> MatchedResult:
                                     )
                                     if parsed_argv[sub_args.name]:
                                         argv_copy.remove(sub_args.name)
+                            subi += 1
+                        ai += 1
                 if argv_copy:
                     template_arguments = [
                         arg for arg in args if isinstance(arg, ArgumentPattern)

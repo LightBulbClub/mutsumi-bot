@@ -21,6 +21,7 @@ class Config:
     command_prefix: list = ["~", "～"]
     confirm_command: list = ["是", "对", "對", "yes", "Yes", "YES", "y", "Y"]
     enable_module_invalid_prompt: bool = False
+    mention_required: bool = False
     no_confirm: bool = False
     quick_confirm: bool = True
 
@@ -29,8 +30,6 @@ class Config:
     enable_commit_url: bool = True
     enable_dirty_check: bool = False
     check_use_textscan_v1: bool = False
-    enable_db: bool = False
-    enable_eval: bool = False
     enable_urlmanager: bool = False
     auto_purge_crontab: str = "0 0 * * *"
 
@@ -83,4 +82,5 @@ class WebRenderConfig:
     enable_web_render: bool = False
     browser_type: str = "chrome"
     browser_executable_path: str = ""
+    remote_only: bool = False
     remote_web_render_url: str = ""

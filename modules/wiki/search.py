@@ -1,11 +1,10 @@
 import asyncio
 import re
-from typing import Union
 
 from core.builtins.bot import Bot
-from core.builtins.message.internal import I18NContext
+from core.builtins.message.internal import I18NContext, Plain
 from core.logger import Logger
-from core.utils.message import is_int
+from core.utils.func import is_int
 from .database.models import WikiTargetInfo
 from .utils.wikilib import WikiLib
 from .wiki import wiki, query_pages
@@ -17,7 +16,7 @@ async def _(msg: Bot.MessageSession, pagename: str):
 
 
 async def search_pages(
-    msg: Bot.MessageSession, title: Union[str, list, tuple], use_prefix: bool = True
+    msg: Bot.MessageSession, title: str | list | tuple, use_prefix: bool = True
 ):
     target = await WikiTargetInfo.get_by_target_id(msg.session_info.target_id)
     start_wiki = target.api_link
@@ -70,8 +69,7 @@ async def search_pages(
         i = 0
         for w in wait_msg_list:
             i += 1
-            w = f"{i}. {w}"
-            msg_list.append(w)
+            msg_list.append(Plain(f"{i}. {w}"))
         msg_list.append(I18NContext("wiki.message.search.prompt"))
     else:
         await msg.finish(I18NContext("wiki.message.search.not_found"))

@@ -1,10 +1,10 @@
-from typing import Iterable, Optional, Set, Union
+from typing import Iterable
 
 
 class Secret:
-    data: Set[str] = set()
-    ip_address: Optional[str] = None
-    ip_country: Optional[str] = None
+    data: set[str] = set()
+    ip_address: str | None = None
+    ip_country: str | None = None
 
     @classmethod
     def add(cls, secret: str):
@@ -12,7 +12,7 @@ class Secret:
             cls.data.add(secret.upper())
 
     @classmethod
-    def check(cls, text: str) -> Union[str, bool]:
+    def check(cls, text: str) -> str | bool:
         for secret in cls.data:
             if secret in text.upper():
                 return secret
@@ -37,6 +37,7 @@ class Info:
     :param subprocess: 是否为子进程。
     :param binary_mode: 是否为二进制模式。
     :param command_parsed: 已处理命令数量。
+    :param message_parsed: 已处理消息数量。
     :param client_name: 客户端名称。
     :param dirty_word_check: 是否启用文本过滤。
     :param web_render_status: WebRender 状态。
@@ -48,6 +49,7 @@ class Info:
     subprocess = False
     binary_mode = False
     command_parsed = 0
+    message_parsed = 0
     client_name = ""
     dirty_word_check = False
     web_render_status = False

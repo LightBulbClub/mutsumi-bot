@@ -8,7 +8,7 @@ from core.utils.random import Random
 from core.utils.storedata import get_stored_list, update_stored_list
 
 
-async def gained_petal(msg: Bot.MessageSession, amount: int) -> I18NContextElement:
+async def gained_petal(msg: Bot.MessageSession, amount: int) -> I18NContextElement | None:
     """增加花瓣。
 
     :param msg: 消息会话。
@@ -45,7 +45,7 @@ async def gained_petal(msg: Bot.MessageSession, amount: int) -> I18NContextEleme
         return I18NContext("petal.message.gained.success", amount=amount)
 
 
-async def lost_petal(msg: Bot.MessageSession, amount: int) -> I18NContextElement:
+async def lost_petal(msg: Bot.MessageSession, amount: int) -> I18NContextElement | None:
     """减少花瓣。
 
     :param msg: 消息会话。
@@ -99,7 +99,7 @@ async def cost_petal(msg: Bot.MessageSession, amount: int, send_prompt: bool = T
     return True
 
 
-async def sign_get_petal(msg: Bot.MessageSession) -> int:
+async def sign_get_petal(msg: Bot.MessageSession) -> int | None:
     if Config("enable_petal", False):
         def _draw_petals() -> int:
             petal = 1

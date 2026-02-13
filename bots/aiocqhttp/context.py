@@ -1,9 +1,8 @@
 import asyncio
-import datetime
 import random
 import re
+import time
 from pathlib import Path
-from typing import Optional, Union, List
 
 import aiocqhttp
 from aiocqhttp import Event, MessageSegment
@@ -47,7 +46,7 @@ async def fake_forward_msg(session_info: SessionInfo, nodelist):
 def convert_msg_nodes(
     session_info: SessionInfo,
     msg_node: MessageNodes,
-) -> List[dict]:
+) -> list[dict]:
     node_list = []
     for message in msg_node.values:
         content = ""
@@ -104,7 +103,7 @@ async def get_avaliable_private_list():
 
 class AIOCQContextManager(ContextManager):
     context: dict[str, Event] = {}
-    features: Optional[Features] = Features
+    features: Features | None = Features
 
     @classmethod
     async def check_native_permission(cls, session_info: SessionInfo) -> bool:
@@ -130,7 +129,7 @@ class AIOCQContextManager(ContextManager):
     async def send_message(cls, session_info: SessionInfo, message: MessageChain | MessageNodes,
                            quote: bool = True,
                            enable_parse_message=True,
-                           enable_split_image=True, ) -> List[str]:
+                           enable_split_image=True, ) -> list[str]:
         # if session_info.session_id not in cls.context:
         #     raise ValueError("Session not found in context")
 
@@ -291,7 +290,7 @@ class AIOCQContextManager(ContextManager):
         return []
 
     @classmethod
-    async def delete_message(cls, session_info: SessionInfo, message_id: Union[str, List[str]]) -> None:
+    async def delete_message(cls, session_info: SessionInfo, message_id: str | list[str], reason: str | None = None) -> None:
         if isinstance(message_id, str):
             message_id = [message_id]
         if not isinstance(message_id, list):
@@ -306,7 +305,87 @@ class AIOCQContextManager(ContextManager):
                     Logger.exception(f"Failed to delete message {x} in session {session_info.session_id}: ")
 
     @classmethod
-    async def add_reaction(cls, session_info: SessionInfo, message_id: Union[str, list[str]], emoji: str) -> None:
+    async def restrict_member(cls, session_info: SessionInfo, user_id: str | list[str], duration: int | None = None, reason: str | None = None) -> None:
+        if isinstance(user_id, str):
+            user_id = [user_id]
+        if not isinstance(user_id, list):
+            raise TypeError("User ID must be a list or str")
+
+        if not duration:
+            duration = 1800
+        if session_info.target_from == target_group_prefix:
+            for x in user_id:
+                try:
+                    await aiocqhttp_bot.call_action("set_group_ban",
+                                                    group_id=session_info.get_common_target_id(),
+                                                    user_id=x.split("|")[-1],
+                                                    duration=duration
+                                                    )
+                    Logger.info(f"Restricted member {x} ({duration}s) in group {session_info.target_id}")
+                except Exception:
+                    Logger.exception(f"Failed to restrict member {x} in group {session_info.target_id}: ")
+
+    @classmethod
+    async def unrestrict_member(cls, session_info: SessionInfo, user_id: str | list[str]) -> None:
+        if isinstance(user_id, str):
+            user_id = [user_id]
+        if not isinstance(user_id, list):
+            raise TypeError("User ID must be a list or str")
+
+        if session_info.target_from == target_group_prefix:
+            for x in user_id:
+                try:
+                    await aiocqhttp_bot.call_action("set_group_ban",
+                                                    group_id=session_info.get_common_target_id(),
+                                                    user_id=x.split("|")[-1],
+                                                    duration=0
+                                                    )
+                    Logger.info(f"Unrestricted member {x} in group {session_info.target_id}")
+                except Exception:
+                    Logger.exception(f"Failed to unrestrict member {x} in group {session_info.target_id}: ")
+
+    @classmethod
+    async def kick_member(cls, session_info: SessionInfo, user_id: str | list[str], reason: str | None = None) -> None:
+        if isinstance(user_id, str):
+            user_id = [user_id]
+        if not isinstance(user_id, list):
+            raise TypeError("User ID must be a list or str")
+
+        if session_info.target_from == target_group_prefix:
+            for x in user_id:
+                try:
+                    await aiocqhttp_bot.call_action("set_group_kick",
+                                                    group_id=session_info.get_common_target_id(),
+                                                    user_id=x.split("|")[-1],
+                                                    reject_add_request=False
+                                                    )
+                    Logger.info(f"Kicked member {x} in group {session_info.target_id}")
+                except Exception:
+                    Logger.exception(
+                        f"Failed to kick member {x} in group {session_info.target_id}: ")
+
+    @classmethod
+    async def ban_member(cls, session_info: SessionInfo, user_id: str | list[str], reason: str | None = None) -> None:
+        if isinstance(user_id, str):
+            user_id = [user_id]
+        if not isinstance(user_id, list):
+            raise TypeError("User ID must be a list or str")
+
+        if session_info.target_from == target_group_prefix:
+            for x in user_id:
+                try:
+                    await aiocqhttp_bot.call_action("set_group_kick",
+                                                    group_id=session_info.get_common_target_id(),
+                                                    user_id=x.split("|")[-1],
+                                                    reject_add_request=True
+                                                    )
+                    Logger.info(f"Banned member {x} in group {session_info.target_id}")
+                except Exception:
+                    Logger.exception(
+                        f"Failed to ban member {x} in group {session_info.target_id}: ")
+
+    @classmethod
+    async def add_reaction(cls, session_info: SessionInfo, message_id: str | list[str], emoji: str) -> None:
         if isinstance(message_id, str):
             message_id = [message_id]
         if not isinstance(message_id, list):
@@ -330,14 +409,14 @@ class AIOCQContextManager(ContextManager):
                                                     code=emoji,
                                                     is_add=True)
                 else:
-                    pass
+                    return
                 Logger.info(f"Added reaction \"{emoji}\" to message {message_id} in session {session_info.session_id}")
             except Exception:
                 Logger.exception(f"Failed to add reaction \"{emoji}\" to message {
                                  message_id} in session {session_info.session_id}: ")
 
     @classmethod
-    async def remove_reaction(cls, session_info: SessionInfo, message_id: Union[str, list[str]], emoji: str) -> None:
+    async def remove_reaction(cls, session_info: SessionInfo, message_id: str | list[str], emoji: str) -> None:
         if isinstance(message_id, str):
             message_id = [message_id]
         if not isinstance(message_id, list):
@@ -361,7 +440,7 @@ class AIOCQContextManager(ContextManager):
                                                     code=emoji,
                                                     is_add=False)
                 else:
-                    pass
+                    return
                 Logger.info(f"Removed reaction \"{emoji}\" to message {
                             message_id} in session {session_info.session_id}")
             except Exception:
@@ -393,9 +472,9 @@ class AIOCQContextManager(ContextManager):
                         is_add=True)
                 else:
                     if session_info.sender_id in last_send_typing_time:
-                        if datetime.datetime.now().timestamp() - last_send_typing_time[session_info.sender_id] <= 3600:
+                        if time.time() - last_send_typing_time[session_info.sender_id] <= 3600:
                             return
-                    last_send_typing_time[session_info.sender_id] = datetime.datetime.now().timestamp()
+                    last_send_typing_time[session_info.sender_id] = time.time()
                     if obi == "shamrock":
                         await aiocqhttp_bot.send_group_msg(
                             group_id=int(session_info.get_common_target_id()),
@@ -454,14 +533,7 @@ class AIOCQContextManager(ContextManager):
                 pass
 
     @classmethod
-    async def call_api(cls, api_name: str, **kwargs) -> Optional[dict]:
-        """
-        调用 OneBot API。
-
-        :param api_name: API 名称
-        :param kwargs: API 参数
-        :return: API 返回结果
-        """
+    async def call_onebot_api(cls, api_name: str, **kwargs) -> dict | None:
         return await aiocqhttp_bot.call_action(api_name, **kwargs)
 
 
@@ -475,7 +547,7 @@ class AIOCQFetchedContextManager(AIOCQContextManager):
     async def send_message(cls, session_info: SessionInfo, message: MessageChain | MessageNodes,
                            quote: bool = True,
                            enable_parse_message=True,
-                           enable_split_image=True, ) -> None:
+                           enable_split_image=True) -> None:
         append_tsk = _tasks_high_priority if session_info.target_info.target_data.get(
             "in_post_whitelist", False) else _tasks
         append_tsk.append(

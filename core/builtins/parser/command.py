@@ -2,7 +2,7 @@ import copy
 import re
 import shlex
 import traceback
-from typing import Dict, Optional, Union, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 from ...exports import exports
 
@@ -25,17 +25,17 @@ class CommandParser:
         args: Module,
         command_prefixes: list,
         module_name=None,
-        msg: Optional["Bot.MessageSession"] = None,
-        is_superuser: Optional[bool] = None,
+        msg: "Bot.MessageSession | None" = None,
+        is_superuser: bool | None = None,
     ):
         args = copy.deepcopy(args)
         self.command_prefixes = command_prefixes
         self.module_name = module_name
         self.origin_template = args
-        self.msg: Union["Bot.MessageSession", None] = msg
+        self.msg: "Bot.MessageSession | None" = msg
         self.options_desc = {}
         self.lang = self.msg.session_info.locale if self.msg else Locale(default_locale)
-        help_docs = {}
+        command_templates = {}
         if is_superuser is None:
             is_superuser = self.msg.check_super_user() if self.msg else False
         is_base_superuser = (
@@ -50,16 +50,16 @@ class CommandParser:
                 show_required_base_superuser=is_base_superuser,
             )
         ):
-            if match.help_doc:
-                for m in match.help_doc:
-                    help_docs[m] = {"priority": match.priority, "meta": match}
+            if match.command_template:
+                for m in match.command_template:
+                    command_templates[m] = {"priority": match.priority, "meta": match}
             else:
-                help_docs[""] = {"priority": match.priority, "meta": match}
+                command_templates[""] = {"priority": match.priority, "meta": match}
             if match.options_desc:
                 for m in match.options_desc:
                     self.options_desc[m] = match.options_desc[m]
 
-        self.args: Dict[Union[Template, ""], dict] = help_docs
+        self.args: dict[Template, dict] = command_templates
 
         seen_values = set()
         deduped_options_desc = {}

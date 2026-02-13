@@ -32,8 +32,9 @@ Bot.register_context_manager(AIOCQFetchedContextManager, fetch_session=True)
 
 dirty_word_check = Config("enable_dirty_check", False)
 default_locale = Config("default_locale", cfg_type=str)
-enable_tos = Config("enable_tos", True)
 ignored_sender = Config("ignored_sender", ignored_sender_default)
+enable_tos = Config("enable_tos", True)
+mention_required = Config("mention_required", False)
 quick_confirm = Config("quick_confirm", True)
 use_url_manager = Config("enable_urlmanager", False)
 disable_temp_session = Config("qq_disable_temp_session", True, table_name="bot_aiocqhttp")
@@ -94,26 +95,28 @@ async def message_handler(event: Event):
         if event.message[0]["type"] == "reply":
             reply_id = int(event.message[0]["data"]["id"])
 
-    prefix = None
+    at_message = False
     if string_post:
         if match_at := re.match(r"^\[CQ:at,qq=(\d+).*\](.*)", event.message):
             if match_at.group(1) == str(event.self_id):
-                event.message = match_at.group(2)
-                if event.message in ["", " "]:
+                at_message = True
+                event.message = match_at.group(2).strip()
+                if not event.message:
                     event.message = f"{command_prefix[0]}help"
-                    prefix = command_prefix
             else:
                 return
     else:
         if event.message[0]["type"] == "at":
             if event.message[0]["data"]["qq"] == str(event.self_id):
+                at_message = True
                 event.message = event.message[1:]
                 if not event.message or \
-                        event.message[0]["type"] == "text" and event.message[0]["data"]["text"] == " ":
+                        event.message[0]["type"] == "text" and not event.message[0]["data"]["text"].strip():
                     event.message = [{"type": "text", "data": {"text": f"{command_prefix[0]}help"}}]
-                    prefix = command_prefix
             else:
                 return
+    if mention_required and not at_message and event.detail_type == "group":
+        return
 
     msg_chain = await to_message_chain(event.message)
 
@@ -134,7 +137,6 @@ async def message_handler(event: Event):
                                        ctx_slot=ctx_id,
                                        use_url_manager=use_url_manager,
                                        require_check_dirty_words=dirty_word_check,
-                                       prefixes=prefix,
                                        tmp=Temp.data.copy()
                                        )
 
@@ -224,7 +226,6 @@ async def _(event: Event):
         if target_info.blocked:
             return {"approve": False}
         return {"approve": True}
-    return {"approve": False}
 
 
 @aiocqhttp_bot.on_notice("group_ban")
@@ -237,16 +238,16 @@ async def _(event: Event):
         if event.duration > 0:
             await UnfriendlyActionRecords.create(target_id=target_id,
                                                  sender_id=sender_id,
-                                                 action="mute",
+                                                 action="restrict",
                                                  detail=str(event.duration))
-            Logger.info(f"Unfriendly action detected: mute ({event.duration})")
+            Logger.info(f"Unfriendly action detected: restrict ({event.duration})")
         result = await UnfriendlyActionRecords.check_mute(target_id=target_id)
         if event.duration >= 259200:  # 3 days
             result = True
         if result and not sender_info.superuser:
-            Logger.info(f"Ban {sender_id} ({target_id}) by ToS: mute")
-            Logger.info(f"Block {target_id} by ToS: mute")
-            reason = Locale(default_locale).t("tos.message.reason.mute")
+            Logger.info(f"Ban {sender_id} ({target_id}) by ToS: restrict")
+            Logger.info(f"Block {target_id} by ToS: restrict")
+            reason = Locale(default_locale).t("tos.message.reason.restrict")
             await tos_report(sender_id, target_id, reason, banned=True)
             await target_info.edit_attr("blocked", True)
             await aiocqhttp_bot.call_action("set_group_leave", group_id=event.group_id)

@@ -47,7 +47,7 @@ se = SimpleEval()
 se.functions.update(math_funcs)
 
 
-async def process_expression(msg: Bot.MessageSession, expr: str, dc: Optional[int]):
+async def process_expression(msg: Bot.MessageSession, expr: str, dc: int | None):
     if not all(
         [
             MAX_DICE_COUNT > 0,
@@ -77,6 +77,7 @@ def parse_dice_expression(msg: Bot.MessageSession, dices: str):
     )  # 数学函数
     errmsg = None
 
+    dices = re.sub(r"(\d+)\.\d+", r"\1", dices)  # 去掉所有小数
     # 切分骰子表达式
     if "#" in dices:
         times = dices.partition("#")[0]
@@ -195,7 +196,7 @@ def generate_dice_message(
     dice_expr_list: list,
     dice_count: int,
     times: int,
-    dc: Optional[int],
+    dc: int | None,
 ):
     """开始投掷并生成消息"""
     success_num = 0

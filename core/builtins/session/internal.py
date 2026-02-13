@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, UTC as datetimeUTC
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Any, Optional, Union, TYPE_CHECKING, List, Match, Tuple, Coroutine
+from typing import Any, Coroutine, Match, TYPE_CHECKING
 
 from attrs import define
 from deprecated import deprecated
@@ -17,9 +17,9 @@ from core.builtins.session.tasks import SessionTaskManager
 from core.builtins.types import MessageElement
 from core.builtins.utils import confirm_command
 from core.config import Config
-from core.constants import FinishedException, WaitCancelException
+from core.constants import SessionFinished, WaitCancelException
 from core.exports import add_export, exports
-from core.utils.message import is_int
+from core.utils.func import is_int
 
 if TYPE_CHECKING:
     from core.queue.server import JobQueueServer
@@ -30,10 +30,10 @@ quick_confirm = Config("quick_confirm", True)
 @define
 class MessageSession:
     session_info: SessionInfo
-    sent: List[MessageChain] = []
-    trigger_msg: Optional[str] = ""
-    matched_msg: Optional[Union[Match[str], Tuple[Any]]] = None
-    parsed_msg: Optional[dict] = None
+    sent: list[MessageChain] = []
+    trigger_msg: str | None = ""
+    matched_msg: Match[str] | tuple[Any, ...] | None = None
+    parsed_msg: dict | None = None
 
     @property
     @deprecated(reason="Use `session_info` instead.")
@@ -53,7 +53,7 @@ class MessageSession:
         disable_secret_check: bool = False,
         enable_parse_message: bool = True,
         enable_split_image: bool = True,
-        callback: Optional[Any] = None,
+        callback: Any | None = None,
     ) -> FinishedSession:
         """
         用于向消息发送者返回消息。
@@ -84,12 +84,12 @@ class MessageSession:
 
     async def finish(
         self,
-        message_chain: Optional[Chainable] = None,
+        message_chain: Chainable | None = None,
         quote: bool = True,
         disable_secret_check: bool = False,
         enable_parse_message: bool = True,
         enable_split_image: bool = True,
-        callback: Optional[Coroutine] = None,
+        callback: Coroutine | None = None,
     ):
         """
         用于向消息发送者返回消息并终结会话（模块后续代码不再执行）。
@@ -113,15 +113,15 @@ class MessageSession:
                 enable_split_image=enable_split_image,
                 callback=callback,
             )
-        raise FinishedException(f)
+        raise SessionFinished(f)
 
     async def send_direct_message(
         self,
-        message_chain: Union[Chainable],
+        message_chain: Chainable,
         disable_secret_check: bool = False,
         enable_parse_message: bool = True,
         enable_split_image: bool = True,
-        callback: Optional[Coroutine] = None,
+        callback: Coroutine | None = None,
     ):
         """
         用于向消息发送者直接发送消息。
@@ -144,26 +144,84 @@ class MessageSession:
         if callback:
             SessionTaskManager.add_callback(return_val["message_id"], callback)
 
-    def as_display(self, text_only: bool = False, element_filter: tuple[MessageElement] = None) -> str:
+    def as_display(
+            self,
+            text_only: bool = False,
+            element_filter: tuple[MessageElement, ...] = None,
+            connector: str = " ") -> str:
         """
         用于将消息转换为一般文本格式。
 
         :param text_only: 是否只保留纯文本。（默认为False）
         :param element_filter: 元素过滤器，用于过滤消息链中的元素。（默认为None）
+        :param connector: 元素连接符，用于连接消息链中的各个元素。（默认为" "）
         :return: 转换后的字符串。
         """
-        return self.session_info.messages.to_str(text_only, element_filter=element_filter)
+        return self.session_info.messages.to_str(text_only, element_filter=element_filter, connector=connector)
 
-    async def delete(self):
+    async def delete(self, reason: str | None = None):
         """
         用于删除这条消息。
+
+        :param reason: 原因（可选）
         """
         _queue_server: "JobQueueServer" = exports["JobQueueServer"]
-        await _queue_server.client_delete_message(self.session_info, self.session_info.message_id)
+        await _queue_server.client_delete_message(self.session_info, self.session_info.message_id, reason)
+
+    async def restrict_member(self, user_id: str | list[str], duration: int | None = None, reason: str | None = None):
+        """
+        用于禁言会话内成员，可能需要该会话的管理员权限。
+
+        :param user_id: 用户 ID
+        :param duration: 禁言时长
+        :param reason: 原因（可选）
+        """
+        _queue_server: "JobQueueServer" = exports["JobQueueServer"]
+        await _queue_server.client_restrict_member(self.session_info, user_id, duration, reason)
+
+    async def unrestrict_member(self, user_id: str | list[str]):
+        """
+        用于解除禁言成员，可能需要该会话的管理员权限。
+
+        :param user_id: 用户 ID
+        """
+        _queue_server: "JobQueueServer" = exports["JobQueueServer"]
+        await _queue_server.client_unrestrict_member(self.session_info, user_id)
+
+    async def kick_member(self, user_id: str | list[str], reason: str | None = None):
+        """
+        用于踢出成员，可能需要该会话的管理员权限。
+
+        :param user_id: 用户 ID
+        :param reason: 原因（可选）
+        """
+        _queue_server: "JobQueueServer" = exports["JobQueueServer"]
+        await _queue_server.client_kick_member(self.session_info, user_id, reason)
+
+    async def ban_member(self, user_id: str | list[str], reason: str | None = None):
+        """
+        用于封禁成员，可能需要该会话的管理员权限。
+
+        :param user_id: 用户 ID
+        :param reason: 原因（可选）
+        """
+        _queue_server: "JobQueueServer" = exports["JobQueueServer"]
+        await _queue_server.client_ban_member(self.session_info, user_id, reason)
+
+    async def unban_member(self, user_id: str | list[str]):
+        """
+        用于解除封禁成员，可能需要该会话的管理员权限。
+
+        :param user_id: 用户 ID
+        """
+        _queue_server: "JobQueueServer" = exports["JobQueueServer"]
+        await _queue_server.client_unban_member(self.session_info, user_id)
 
     async def add_reaction(self, emoji: str) -> Any:
         """
         用于给这条消息添加反应。
+
+        :param emoji: 反应内容（如表情符号）
         """
         _queue_server: "JobQueueServer" = exports["JobQueueServer"]
         return await _queue_server.client_add_reaction(self.session_info, self.session_info.message_id, emoji)
@@ -171,6 +229,8 @@ class MessageSession:
     async def remove_reaction(self, emoji: str) -> Any:
         """
         用于给这条消息删除反应。
+
+        :param emoji: 反应内容（如表情符号）
         """
         _queue_server: "JobQueueServer" = exports["JobQueueServer"]
         return await _queue_server.client_remove_reaction(self.session_info, self.session_info.message_id, emoji)
@@ -214,31 +274,24 @@ class MessageSession:
         _queue_server: "JobQueueServer" = exports["JobQueueServer"]
         await _queue_server.client_end_typing_signal(self.session_info)
 
-    async def _add_confirm_reaction(self, message_id: Union[str, List[str]]):
-        if isinstance(message_id, str):
-            message_id = [message_id]
+    async def _add_confirm_reaction(self, message_id: str | list[str]):
         _queue_server: "JobQueueServer" = exports["JobQueueServer"]
         if self.session_info.support_reaction:
             if self.session_info.client_name in ["QQ", "QQBot"]:
-                if self.session_info.locale.locale == "ja_jp":
-                    await _queue_server.client_add_reaction(self.session_info, message_id, "11093")
-                else:
-                    await _queue_server.client_add_reaction(self.session_info, message_id, "11088")
+                await _queue_server.client_add_reaction(self.session_info, message_id, "11093")
                 await _queue_server.client_add_reaction(self.session_info, message_id, "10060")
             else:
-                if self.session_info.locale.locale == "ja_jp":
-                    await _queue_server.client_add_reaction(self.session_info, message_id, "⭕")
-                else:
-                    await _queue_server.client_add_reaction(self.session_info, message_id, "✅")
+                await _queue_server.client_add_reaction(self.session_info, message_id, "⭕")
                 await _queue_server.client_add_reaction(self.session_info, message_id, "❌")
 
     async def wait_confirm(
         self,
-        message_chain: Optional[Chainable] = None,
+        message_chain: Chainable | None = None,
         quote: bool = True,
         delete: bool = True,
-        timeout: Optional[float] = 120,
+        timeout: float | None = 120,
         append_instruction: bool = True,
+        no_confirm_action: bool = True
     ) -> bool:
         """
         一次性模板，用于等待触发对象确认。
@@ -248,13 +301,14 @@ class MessageSession:
         :param delete: 是否在触发后删除消息。（默认为True）
         :param timeout: 超时时间。（默认为120）
         :param append_instruction: 是否在发送的消息中附加提示。
+        :param no_confirm_action: 在 `no_confirm` 配置项启用后的默认行为。
         :return: 若对象发送confirm_command中的其一文本时返回True，反之则返回False。
         """
         send = None
         ExecutionLockList.remove(self)
         await self.end_typing()
         if Config("no_confirm", False):
-            return True
+            return no_confirm_action
         if message_chain:
             message_chain = get_message_chain(self.session_info, message_chain)
         else:
@@ -290,12 +344,11 @@ class MessageSession:
 
     async def wait_next_message(
         self,
-        message_chain: Optional[Chainable] = None,
+        message_chain: Chainable | None = None,
         quote: bool = True,
         delete: bool = False,
-        timeout: Optional[float] = 120,
+        timeout: float | None = 120,
         append_instruction: bool = True,
-        add_confirm_reaction: bool = False,
     ) -> MessageSession:
         """
         一次性模板，用于等待对象的下一条消息。
@@ -317,8 +370,6 @@ class MessageSession:
                 message_chain.append(I18NContext("message.wait.next_message.prompt"))
             send = await self.send_message(message_chain, quote)
         await asyncio.sleep(0.1)
-        if add_confirm_reaction and quick_confirm:
-            await self._add_confirm_reaction(send.message_id)
 
         flag = asyncio.Event()
         SessionTaskManager.add_task(self, flag, timeout=timeout)
@@ -335,60 +386,12 @@ class MessageSession:
             return result
         raise WaitCancelException
 
-    async def wait_reply(
-        self,
-        message_chain: Union[Chainable],
-        quote: bool = True,
-        delete: bool = False,
-        timeout: Optional[float] = 120,
-        all_: bool = False,
-        append_instruction: bool = True,
-        add_confirm_reaction: bool = False,
-    ) -> MessageSession:
-        """
-        一次性模板，用于等待触发对象回复消息。
-
-        :param message_chain: 需要发送的确认消息。
-        :param quote: 是否引用传入dict中的消息。（默认为True）
-        :param delete: 是否在触发后删除消息。（默认为False）
-        :param timeout: 超时时间。（默认为120）
-        :param all_: 是否设置触发对象为对象内的所有人。（默认为False）
-        :param append_instruction: 是否在发送的消息中附加提示。
-        :return: 回复消息的MessageChain对象。
-        """
-        send = None
-        ExecutionLockList.remove(self)
-        await self.end_typing()
-        message_chain = get_message_chain(self.session_info, message_chain)
-        if append_instruction:
-            message_chain.append(I18NContext("message.reply.prompt"))
-        send = await self.send_message(message_chain, quote)
-        await asyncio.sleep(0.1)
-        if add_confirm_reaction and quick_confirm:
-            await self._add_confirm_reaction(send.message_id)
-        flag = asyncio.Event()
-        SessionTaskManager.add_task(
-            self, flag, reply=send.message_id, all_=all_, timeout=timeout
-        )
-        try:
-            await asyncio.wait_for(flag.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
-            if send and delete:
-                await send.delete()
-            raise WaitCancelException
-        result = SessionTaskManager.get_result(self)
-        if send and delete:
-            await send.delete()
-        if result:
-            return result
-        raise WaitCancelException
-
     async def wait_anyone(
         self,
-        message_chain: Optional[Chainable] = None,
+        message_chain: Chainable | None = None,
         quote: bool = False,
         delete: bool = False,
-        timeout: Optional[float] = 120,
+        timeout: float | None = 120,
     ) -> MessageSession:
         """
         一次性模板，用于等待触发对象所属对话内任意成员确认。
@@ -423,6 +426,59 @@ class MessageSession:
             ]
         raise WaitCancelException
 
+    async def wait_reply(
+        self,
+        message_chain: Chainable,
+        quote: bool = True,
+        delete: bool = False,
+        timeout: float | None = 120,
+        all_: bool = False,
+        append_instruction: bool = True,
+    ) -> MessageSession:
+        """
+        一次性模板，用于等待触发对象回复消息。
+
+        :param message_chain: 需要发送的确认消息。
+        :param quote: 是否引用传入dict中的消息。（默认为True）
+        :param delete: 是否在触发后删除消息。（默认为False）
+        :param timeout: 超时时间。（默认为120）
+        :param all_: 是否设置触发对象为对象内的所有人。（默认为False）
+        :param append_instruction: 是否在发送的消息中附加提示。
+        :return: 回复消息的MessageChain对象。
+        """
+        if not self.session_info.support_quote:
+            message_chain = get_message_chain(self.session_info, message_chain)
+            if append_instruction:
+                message_chain.append(I18NContext("message.wait.next_message.prompt"))
+            if all_:
+                return await self.wait_anyone(message_chain, False, delete, timeout)
+            return await self.wait_next_message(message_chain, False, delete, timeout, False)
+
+        send = None
+        ExecutionLockList.remove(self)
+        await self.end_typing()
+        message_chain = get_message_chain(self.session_info, message_chain)
+        if append_instruction:
+            message_chain.append(I18NContext("message.reply.prompt"))
+        send = await self.send_message(message_chain, quote)
+        await asyncio.sleep(0.1)
+        flag = asyncio.Event()
+        SessionTaskManager.add_task(
+            self, flag, reply=send.message_id, all_=all_, timeout=timeout
+        )
+        try:
+            await asyncio.wait_for(flag.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            if send and delete:
+                await send.delete()
+            raise WaitCancelException
+        result = SessionTaskManager.get_result(self)
+        if send and delete:
+            await send.delete()
+        if result:
+            return result
+        raise WaitCancelException
+
     async def sleep(self, s: float):
         ExecutionLockList.remove(self)
         await asyncio.sleep(s)
@@ -441,12 +497,20 @@ class MessageSession:
             return True
         return await self.check_native_permission()
 
-    async def qq_call_api(self, api_name: str, **kwargs) -> Any:
+    async def call_onebot_api(self, api_name: str, **kwargs) -> Any:
         """
-        用于 QQ 平台调用 API。
+        调用 OneBot API。
+
+        :param api_name: API 名称
+        :param kwargs: API 参数
+        :return: API 返回结果
         """
         _queue_server: "JobQueueServer" = exports["JobQueueServer"]
-        return await _queue_server.qq_call_api(self.session_info, api_name=api_name, **kwargs)
+        return await _queue_server.call_onebot_api(self.session_info, api_name=api_name, **kwargs)
+
+    @deprecated(reason="Use `call_onebot_api` instead.")
+    async def call_api(self, api_name: str, **kwargs):
+        return await self.call_onebot_api(api_name, **kwargs)
 
     waitConfirm = wait_confirm
     waitNextMessage = wait_next_message
@@ -458,6 +522,7 @@ class MessageSession:
     sendDirectMessage = send_direct_message
     asDisplay = as_display
     checkNativePermission = check_native_permission
+    callOneBotAPI = call_onebot_api
 
     def format_time(
         self,
@@ -505,7 +570,7 @@ class MessageSession:
 
     def format_num(
         self,
-        number: Union[Decimal, int, str],
+        number: Decimal | int | str,
         precision: int = 0
     ) -> str:
         """
@@ -516,7 +581,7 @@ class MessageSession:
         :returns: 本地化后的数字。
         """
 
-        def _get_cjk_unit(number: Decimal) -> Optional[Tuple[int, Decimal]]:
+        def _get_cjk_unit(number: Decimal) -> tuple[int, Decimal] | None:
             if number >= Decimal("10e11"):
                 return 3, Decimal("10e11")
             if number >= Decimal("10e7"):
@@ -525,7 +590,7 @@ class MessageSession:
                 return 1, Decimal("10e3")
             return None
 
-        def _get_unit(number: Decimal) -> Optional[Tuple[int, Decimal]]:
+        def _get_unit(number: Decimal) -> tuple[int, Decimal] | None:
             if number >= Decimal("10e8"):
                 return 3, Decimal("10e8")
             if number >= Decimal("10e5"):
@@ -546,7 +611,7 @@ class MessageSession:
         else:
             return str(number)
 
-        if self.session_info.locale.locale in ["zh_cn", "zh_tw"]:
+        if self.session_info.locale.locale in ["ja_jp", "zh_cn", "zh_tw"]:
             unit_info = _get_cjk_unit(Decimal(number))
         else:
             unit_info = _get_unit(Decimal(number))
@@ -571,10 +636,10 @@ class FinishedSession:
     结束会话。
     """
     session: SessionInfo
-    message_id: Union[List[int], List[str], int, str] = None
+    message_id: list[int] | list[str] | int | str | None = None
 
     @classmethod
-    def assign(cls, session: SessionInfo, message_id: Union[List[int], List[str], int, str]):
+    def assign(cls, session: SessionInfo, message_id: list[int] | list[str] | int | str):
         if isinstance(message_id, (int, str)):
             message_id = [message_id]
         return cls(session, message_id)
@@ -597,7 +662,7 @@ class FetchedMessageSession(MessageSession):
     """
 
     @classmethod
-    async def from_session_info(cls, session: Union[FetchedSessionInfo, SessionInfo]):
+    async def from_session_info(cls, session: FetchedSessionInfo | SessionInfo):
         return cls(
             session_info=session
         )

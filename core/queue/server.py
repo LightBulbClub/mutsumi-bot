@@ -1,12 +1,13 @@
 import re
-
-from typing import Union, TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from core.builtins.parser.command import CommandParser
 from core.builtins.parser.message import parser
 from core.builtins.utils import command_prefix
+from core.constants.path import PrivateAssets
 from core.utils.bash import run_sys_command
-from core.web_render import init_web_render
+from core.web_render import web_render
+from ..alive import Alive
 from .base import JobQueueBase
 from ..builtins.converter import converter
 from ..builtins.message.chain import MessageChain, MessageNodes
@@ -16,7 +17,6 @@ from ..exports import exports, add_export
 from ..i18n import Locale
 from ..loader import ModulesManager
 from ..logger import Logger
-from ..utils.alive import Alive
 
 if TYPE_CHECKING:
     from core.builtins.bot import Bot
@@ -31,7 +31,7 @@ class JobQueueServer(JobQueueBase):
                                   enable_split_image: bool = True):
         value = await cls.add_job(session_info.client_name, "send_message",
                                   {"session_info": converter.unstructure(session_info),
-                                   "message": converter.unstructure(message, Union[MessageChain, MessageNodes]),
+                                   "message": converter.unstructure(message, MessageChain | MessageNodes),
                                    "quote": quote,
                                    "enable_parse_message": enable_parse_message,
                                    "enable_split_image": enable_split_image
@@ -39,16 +39,56 @@ class JobQueueServer(JobQueueBase):
         return value
 
     @classmethod
-    async def client_delete_message(cls, session_info: SessionInfo, message_id: Union[str, list[str]]):
+    async def client_delete_message(cls, session_info: SessionInfo, message_id: str | list[str], reason: str | None = None):
         if isinstance(message_id, str):
             message_id = [message_id]
         value = await cls.add_job(session_info.client_name, "delete_message",
                                   {"session_info": converter.unstructure(session_info),
-                                   "message_id": message_id}, wait=False)
+                                   "message_id": message_id,
+                                   "reason": reason}, wait=False)
         return value
 
     @classmethod
-    async def client_add_reaction(cls, session_info: SessionInfo, message_id: Union[str, list[str]], emoji: str):
+    async def client_restrict_member(cls, session_info: SessionInfo, user_id: str | list[str], duration: int | None = None, reason: str | None = None):
+        value = await cls.add_job(session_info.client_name, "restrict_member",
+                                  {"session_info": converter.unstructure(session_info),
+                                   "user_id": user_id,
+                                   "duration": duration,
+                                   "reason": reason}, wait=False)
+        return value
+
+    @classmethod
+    async def client_unrestrict_member(cls, session_info: SessionInfo, user_id: str | list[str]):
+        value = await cls.add_job(session_info.client_name, "unrestrict_member",
+                                  {"session_info": converter.unstructure(session_info),
+                                   "user_id": user_id}, wait=False)
+        return value
+
+    @classmethod
+    async def client_kick_member(cls, session_info: SessionInfo, user_id: str | list[str], reason: str | None = None):
+        value = await cls.add_job(session_info.client_name, "kick_member",
+                                  {"session_info": converter.unstructure(session_info),
+                                   "user_id": user_id,
+                                   "reason": reason}, wait=False)
+        return value
+
+    @classmethod
+    async def client_ban_member(cls, session_info: SessionInfo, user_id: str | list[str], reason: str | None = None):
+        value = await cls.add_job(session_info.client_name, "ban_member",
+                                  {"session_info": converter.unstructure(session_info),
+                                   "user_id": user_id,
+                                   "reason": reason}, wait=False)
+        return value
+
+    @classmethod
+    async def client_unban_member(cls, session_info: SessionInfo, user_id: str | list[str]):
+        value = await cls.add_job(session_info.client_name, "unban_member",
+                                  {"session_info": converter.unstructure(session_info),
+                                   "user_id": user_id}, wait=False)
+        return value
+
+    @classmethod
+    async def client_add_reaction(cls, session_info: SessionInfo, message_id: str | list[str], emoji: str):
         value = await cls.add_job(session_info.client_name, "add_reaction",
                                   {"session_info": converter.unstructure(session_info),
                                    "message_id": message_id,
@@ -56,8 +96,8 @@ class JobQueueServer(JobQueueBase):
         return value
 
     @classmethod
-    async def client_remove_reaction(cls, session_info: SessionInfo, message_id: Union[str, list[str]], emoji: str):
-        value = await cls.add_job(session_info.client_name, "add_reaction",
+    async def client_remove_reaction(cls, session_info: SessionInfo, message_id: str | list[str], emoji: str):
+        value = await cls.add_job(session_info.client_name, "remove_reaction",
                                   {"session_info": converter.unstructure(session_info),
                                    "message_id": message_id,
                                    "emoji": emoji})
@@ -100,8 +140,8 @@ class JobQueueServer(JobQueueBase):
         return value
 
     @classmethod
-    async def qq_call_api(cls, session_info: SessionInfo, api_name: str, **kwargs: dict):
-        value = await cls.add_job(session_info.client_name, "qq_call_api",
+    async def call_onebot_api(cls, session_info: SessionInfo, api_name: str, **kwargs: dict):
+        value = await cls.add_job(session_info.client_name, "call_onebot_api",
                                   {"session_info": converter.unstructure(session_info),
                                    "api_name": api_name,
                                    "args": kwargs})
@@ -126,7 +166,7 @@ async def client_keepalive(tsk: JobQueuesTable, args: dict):
 @JobQueueServer.action("trigger_hook")
 async def _(tsk: JobQueuesTable, args: dict):
     bot: "Bot" = exports["Bot"]
-    session_info: Optional[SessionInfo] = None
+    session_info: SessionInfo | None = None
     if args["session_info"]:
         session_info = converter.structure(args["session_info"], SessionInfo)
         await session_info.refresh_info()
@@ -144,7 +184,7 @@ async def client_direct_message(tsk: JobQueuesTable, args: dict):
     bot: "Bot" = exports["Bot"]
     session_info = converter.structure(args["session_info"], SessionInfo)
     await session_info.refresh_info()
-    message = converter.structure(args["message"], Union[MessageChain, MessageNodes])
+    message = converter.structure(args["message"], MessageChain | MessageNodes)
     await bot.send_direct_message(session_info, message, disable_secret_check=args["disable_secret_check"],
                                   enable_parse_message=args["enable_parse_message"])
     return {"success": True}
@@ -153,16 +193,21 @@ async def client_direct_message(tsk: JobQueuesTable, args: dict):
 @JobQueueServer.action("get_bot_version")
 async def get_bot_version(tsk: JobQueuesTable, args: dict):
     version = None
-    returncode, commit_hash, _ = await run_sys_command(["git", "rev-parse", "HEAD"])
-    if returncode == 0:
-        version = commit_hash
+    version_path = PrivateAssets.path / ".version"
+    if version_path.exists():
+        with open(version_path, "r") as f:
+            version = f.read()
+    else:
+        returncode, commit_hash, _ = await run_sys_command(["git", "rev-parse", "HEAD"])
+        if returncode == 0:
+            version = f"git:{commit_hash}"
+
     return {"version": version}
 
 
 @JobQueueServer.action("get_web_render_status")
 async def get_web_render_status(tsk: JobQueuesTable, args: dict):
-    web_render_status = await init_web_render()
-    return {"web_render_status": web_render_status}
+    return {"web_render_status": await web_render.browser.check_status()}
 
 
 @JobQueueServer.action("get_modules_list")

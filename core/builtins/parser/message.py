@@ -2,10 +2,10 @@ import copy
 import difflib
 import inspect
 import re
+import time
 import traceback
-from datetime import datetime
 from string import Template as stringTemplate
-from typing import List, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 from core.builtins.message.chain import MessageChain, match_kecode
 from core.builtins.message.internal import Plain, I18NContext
@@ -15,19 +15,19 @@ from core.builtins.session.lock import ExecutionLockList
 from core.builtins.session.tasks import SessionTaskManager
 from core.config import Config
 from core.constants.default import bug_report_url_default, ignored_sender_default
-from core.constants.exceptions import AbuseWarning, FinishedException, InvalidCommandFormatError, \
-    InvalidHelpDocTypeError, \
-    WaitCancelException, NoReportException, SendMessageFailed
+from core.constants.exceptions import AbuseWarning, ExternalException, \
+    InvalidCommandFormatError, InvalidHelpDocTypeError, \
+    NoReportException, SessionFinished, SendMessageFailed, WaitCancelException
 from core.constants.info import Info
 from core.database.models import AnalyticsData
 from core.exports import exports
 from core.loader import ModulesManager
 from core.logger import Logger
-from core.tos import abuse_warn_target
+from core.tos import TOS_TEMPBAN_TIME, temp_ban_counter, abuse_warn_target, remove_temp_ban
 from core.types import Module, Param
 from core.types.module.component_meta import CommandMeta
-from core.utils.message import normalize_space
-from core.utils.temp import TempCounter
+from core.utils.func import normalize_space
+from core.utils.container import ExpiringTempDict, TokenBucket
 
 if TYPE_CHECKING:
     from core.builtins.bot import Bot
@@ -38,7 +38,6 @@ enable_tos = Config("enable_tos", True)
 enable_analytics = Config("enable_analytics", True)
 report_targets = Config("report_targets", [])
 enable_module_invalid_prompt = Config("enable_module_invalid_prompt", False)
-TOS_TEMPBAN_TIME = Config("tos_temp_ban_time", 300) if Config("tos_temp_ban_time", 300) > 0 else 300
 bug_report_url = Config("bug_report_url", bug_report_url_default)
 
 typo_check_module_score = Config("typo_check_module_score", 0.6)
@@ -46,28 +45,10 @@ typo_check_command_score = Config("typo_check_command_score", 0.3)
 typo_check_args_score = Config("typo_check_args_score", 0.5)
 typo_check_options_score = Config("typo_check_options_score", 0.3)
 
-counter_same = {}  # 命令使用次数计数（重复使用单一命令）
-counter_all = {}  # 命令使用次数计数（使用所有命令）
-
-temp_ban_counter = {}  # 临时封禁计数
-cooldown_counter = {}  # 冷却计数
-
-match_hash_cache = {}
-
-
-async def check_temp_ban(target):
-    is_temp_banned = temp_ban_counter.get(target)
-    if is_temp_banned:
-        ban_time = datetime.now().timestamp() - is_temp_banned["ts"]
-        ban_time_remain = int(TOS_TEMPBAN_TIME - ban_time)
-        if ban_time_remain > 0:
-            return ban_time_remain
-    return False
-
-
-async def remove_temp_ban(target):
-    if await check_temp_ban(target):
-        del temp_ban_counter[target]
+buckets_same = ExpiringTempDict()  # 命令使用次数计数（重复使用单一命令）
+buckets_all = ExpiringTempDict()  # 命令使用次数计数（使用所有命令）
+target_cooldown_counter = ExpiringTempDict(exp=TOS_TEMPBAN_TIME)  # 冷却计数
+match_hash_cache = ExpiringTempDict()
 
 
 async def parser(msg: "Bot.MessageSession"):
@@ -148,41 +129,56 @@ async def parser(msg: "Bot.MessageSession"):
     except Exception:
         Logger.exception()
     finally:
-        await msg.end_typing()
         ExecutionLockList.remove(msg)
-        TempCounter.add()
+        Info.message_parsed += 1
 
 
 def _transform_alias(msg, command: str):
     aliases = dict(msg.session_info.target_info.target_data.get("command_alias", {}).items())
-    command_split = msg.trigger_msg.split(" ")  # 切割消息
+    matched_aliases = []  # 用来记录所有可匹配的模板 (placeholder_count, pattern, replacement, match_obj)
+
     for pattern, replacement in aliases.items():
         if re.search(r"\${[^}]*}", pattern):
-            # 使用正则表达式匹配并分隔多个连在一起的占位符
-            pattern = re.sub(r"(\$\{\w+})(?=\$\{\w+})", r"\1 ", pattern)
-            # 匹配占位符
-            pattern_placeholders = re.findall(r"\$\{([^{}$]+)}", pattern)
-
-            regex_pattern = re.escape(pattern)
-            for placeholder in pattern_placeholders:
-                regex_pattern = regex_pattern.replace(re.escape(f"${{{placeholder}}}"), r"(\S+)")  # 匹配非空格字符
+            # 处理连在一起的多个占位符
+            normalized_pattern = re.sub(r"(\$\{\w+})(?=\$\{\w+})", r"\1 ", pattern)
+            # 提取占位符
+            placeholders = re.findall(r"\$\{([^{}$]+)}", normalized_pattern)
+            # 构造匹配正则
+            regex_pattern = re.escape(normalized_pattern)
+            for ph in placeholders:
+                regex_pattern = regex_pattern.replace(
+                    re.escape(f"${{{ph}}}"), r"(\S+)"
+                )
 
             match = re.match(regex_pattern, command)
             if match:
-                groups = match.groups()
-                placeholder_dict = {placeholder: groups[i] for i,
-                                    placeholder in enumerate(pattern_placeholders) if i < len(groups)}
-                result = stringTemplate(replacement).safe_substitute(placeholder_dict)
+                # 记录匹配结果
+                matched_aliases.append(
+                    (len(placeholders), pattern, replacement, placeholders, match)
+                )
 
-                Logger.debug(msg.session_info.prefixes[0] + result)
-                return msg.session_info.prefixes[0] + result
-        elif command_split[0] == pattern:
-            # 旧语法兼容
-            command_split[0] = msg.session_info.prefixes[0] + replacement  # 将自定义别名替换为命令
-            Logger.debug(" ".join(command_split))
-            return " ".join(command_split)  # 重新连接消息
-        else:
-            pass
+    # 复杂度最高的优先
+    if matched_aliases:
+        matched_aliases.sort(key=lambda x: x[0], reverse=True)  # 按占位符数量降序
+
+        _, pattern, replacement, placeholders, match = matched_aliases[0]
+        groups = match.groups()
+        placeholder_dict = {
+            placeholders[i]: groups[i]
+            for i in range(len(groups))
+        }
+
+        result = stringTemplate(replacement).safe_substitute(placeholder_dict)
+        Logger.debug(msg.session_info.prefixes[0] + result)
+        return msg.session_info.prefixes[0] + result
+
+    # 处理不带占位符的命令别名
+    for pattern, replacement in aliases.items():
+        if not re.search(r"\${[^}]*}", pattern):
+            if command.startswith(pattern):
+                new_command = command.replace(pattern, msg.session_info.prefixes[0] + replacement, 1)
+                Logger.debug(new_command)
+                return new_command
 
     return command
 
@@ -204,7 +200,7 @@ def _get_prefixes(msg: "Bot.MessageSession"):
             break
     if in_prefix_list or disable_prefix:  # 检查消息前缀
         if len(msg.trigger_msg) <= 1 or msg.trigger_msg[:2] == "~~":  # 排除 ~~xxx~~ 的情况
-            return False, False, ""
+            return False, False
         if in_prefix_list:  # 如果在命令前缀列表中，则将此命令前缀移动到列表首位
             msg.session_info.prefixes.remove(display_prefix)
             msg.session_info.prefixes.insert(0, display_prefix)
@@ -243,7 +239,7 @@ async def _process_command(msg: "Bot.MessageSession", modules, disable_prefix, i
                     alias_list.append(alias)
 
     if alias_list:
-        max_alias = max(alias_list, key=len)
+        max_alias = str(max(alias_list, key=len))
         real_name = ModulesManager.modules_aliases[max_alias]
         command_words = command.split(" ")
         command_words = real_name.split(" ") + command_words[len(max_alias.split(" ")):]
@@ -254,15 +250,18 @@ async def _process_command(msg: "Bot.MessageSession", modules, disable_prefix, i
 
 
 async def _execute_module(msg: "Bot.MessageSession", modules, command_first_word, identify_str):
-    time_start = datetime.now()
+    time_start = time.perf_counter()
     bot: "Bot" = exports["Bot"]
+    _typing = False
     try:
         await _check_target_cooldown(msg)
         if enable_tos:
-            await _check_temp_ban(msg)
+            await _tos_temp_ban(msg)
 
         module: Module = modules[command_first_word]
         if not module.command_list.set:  # 如果没有可用的命令，则展示模块简介
+            if module.rss and not msg.session_info.support_rss:
+                return
             if module.desc:
                 desc = [I18NContext("parser.module.desc", desc=msg.session_info.locale.t_str(module.desc))]
                 if command_first_word not in msg.session_info.enabled_modules:
@@ -286,43 +285,44 @@ async def _execute_module(msg: "Bot.MessageSession", modules, command_first_word
                 return
         elif not module.base:
             if command_first_word not in msg.session_info.enabled_modules and msg.session_info.require_enable_modules:  # 若未开启
-                await msg.send_message(I18NContext("parser.module.disabled.prompt", module=command_first_word,
-                                                   prefix=msg.session_info.prefixes[0]))
                 if await msg.check_permission():
-                    if await msg.wait_confirm(I18NContext("parser.module.disabled.to_enable")):
+                    await msg.send_message(I18NContext("parser.module.disabled.prompt", module=command_first_word,
+                                                       prefix=msg.session_info.prefixes[0]))
+                    if await msg.wait_confirm(I18NContext("parser.module.disabled.to_enable"), no_confirm_action=False):
                         await msg.session_info.target_info.config_module(command_first_word)
                         await msg.send_message(
                             I18NContext("core.message.module.enable.success", module=command_first_word))
                     else:
                         return
                 else:
-                    return
+                    await msg.finish(I18NContext("parser.module.disabled", module=command_first_word))
         elif module.required_admin:
             if not await msg.check_permission():
-                await msg.send_message(I18NContext("parser.admin.module.permission.denied", module=command_first_word))
+                await msg.send_message(I18NContext("parser.admin.permission.denied.module", module=command_first_word))
                 return
 
         if not module.base:
-            if enable_tos:  # 检查TOS是否滥用命令
+            if enable_tos:  # 检查ToS是否滥用命令
                 await _tos_msg_counter(msg, msg.trigger_msg)
             else:
                 Logger.debug("Tos is disabled, check the configuration if it is not work as expected.")
 
-        none_doc = True  # 检查模块绑定的命令是否有文档
+        none_templates = True  # 检查模块绑定的命令是否有模板
         for func in module.command_list.get(msg.session_info.target_from):
-            if func.help_doc:
-                none_doc = False
-        if not none_doc:  # 如果有，送入命令解析
+            if func.command_template:
+                none_templates = False
+        if not none_templates:  # 如果有，送入命令解析
             await _execute_module_command(msg, module, command_first_word)
-        else:  # 如果没有，直接传入下游模块
-            msg.parsed_msg = None
-            for func in module.command_list.set:
-                if not func.help_doc:
-                    if msg.session_info.sender_info.sender_data.get("typing_prompt", True):
-                        await msg.start_typing()
-                    await func.function(msg)  # 将msg传入下游模块
-
-                    raise FinishedException(msg.sent)  # if not using msg.finish
+            raise SessionFinished(msg.sent)  # if not using msg.finish
+        # 如果没有，直接传入下游模块
+        msg.parsed_msg = None
+        for func in module.command_list.set:
+            if not func.command_template:
+                if msg.session_info.sender_info.sender_data.get("typing_prompt", True):
+                    await msg.start_typing()
+                    _typing = True
+                await func.function(msg)  # 将msg传入下游模块
+                raise SessionFinished(msg.sent)  # if not using msg.finish
 
         if msg.session_info.sender_info.sender_data.get("typo_check", True):  # 判断是否开启错字检查
             new_msg, new_command_first_word, confirmed = await _command_typo_check(msg, modules, command_first_word)
@@ -332,17 +332,16 @@ async def _execute_module(msg: "Bot.MessageSession", modules, command_first_word
                 else:
                     await msg.send_message(I18NContext("parser.module.unloaded", module=new_command_first_word))
             elif not confirmed:
-                await msg.send_message(I18NContext("parser.command.invalid.format",
+                await msg.send_message(I18NContext("parser.command.invalid.syntax",
                                                    module=command_first_word,
                                                    prefix=msg.session_info.prefixes[0]))
     except SendMessageFailed:
         await _process_send_message_failed(msg)
 
-    except FinishedException as e:
-
-        time_used = datetime.now() - time_start
+    except SessionFinished as e:
+        time_used = time.perf_counter() - time_start
         Logger.success(f"Successfully finished session from {identify_str}, returns: {str(e)}. "
-                       f"Times take up: {str(time_used)}")
+                       f"Times take up: {time_used:06f}s")
         Info.command_parsed += 1
         if enable_analytics:
             await AnalyticsData.create(target_id=msg.session_info.target_id,
@@ -350,6 +349,10 @@ async def _execute_module(msg: "Bot.MessageSession", modules, command_first_word
                                        command=msg.trigger_msg,
                                        module_name=command_first_word,
                                        module_type="normal")
+
+    except ExternalException as e:
+        await _process_external_exception(msg, e)
+
     except AbuseWarning as e:
         await _process_tos_abuse_warning(msg, e)
 
@@ -357,15 +360,22 @@ async def _execute_module(msg: "Bot.MessageSession", modules, command_first_word
         await _process_noreport_exception(msg, e)
 
     except Exception as e:
-        await _process_exception(msg, e)
+        if "timeout" in str(e).lower().replace(" ", ""):
+            await _process_external_exception(msg, e)
+        else:
+            await _process_exception(msg, e)
     finally:
-        await msg.end_typing()
+        if _typing:
+            await msg.end_typing()
         ExecutionLockList.remove(msg)
 
 
 async def _execute_regex(msg: "Bot.MessageSession", modules, identify_str):
     bot: "Bot" = exports["Bot"]
     for m in modules:  # 遍历模块
+        if not modules[m]._db_load:
+            continue
+
         try:
             if m in msg.session_info.enabled_modules and modules[m].regex_list.set:  # 如果模块已启用
                 regex_module: Module = modules[m]
@@ -389,7 +399,7 @@ async def _execute_regex(msg: "Bot.MessageSession", modules, identify_str):
                     continue
 
                 for rfunc in regex_module.regex_list.set:  # 遍历正则模块的表达式
-                    time_start = datetime.now()
+                    time_start = time.perf_counter()
                     matched = False
                     _typing = False
                     try:
@@ -401,8 +411,7 @@ async def _execute_regex(msg: "Bot.MessageSession", modules, identify_str):
                                 matched = True
                                 matched_hash = hash(msg.matched_msg.groups())
                         elif rfunc.mode.upper() in ["A", "FINDALL"]:
-                            msg.matched_msg = re.findall(rfunc.pattern, trigger_msg, flags=rfunc.flags)
-                            msg.matched_msg = tuple(set(msg.matched_msg))
+                            msg.matched_msg = tuple(set(re.findall(rfunc.pattern, trigger_msg, flags=rfunc.flags)))
                             if msg.matched_msg:
                                 matched = True
                                 matched_hash = hash(msg.matched_msg)
@@ -418,18 +427,15 @@ async def _execute_regex(msg: "Bot.MessageSession", modules, identify_str):
                                 Logger.info(
                                     f"{identify_str} -> [Bot]: {msg.trigger_msg}")
                             Logger.debug("Matched hash:" + str(matched_hash))
-                            if msg.session_info.target_id not in match_hash_cache:
-                                match_hash_cache[msg.session_info.target_id] = {}
-                            if rfunc.logging and matched_hash in match_hash_cache[msg.session_info.target_id] and \
-                                    datetime.now().timestamp() - match_hash_cache[msg.session_info.target_id][
-                                    matched_hash] < int(
-                                    (msg.session_info.target_info.target_data.get("cooldown_time", 0)) or 3):
+                            cooldown_time = int(msg.session_info.target_info.target_data.get("cooldown_time", 0) or 3)
+                            if rfunc.logging and matched_hash in match_hash_cache[msg.session_info.target_id]:
                                 Logger.warning("Match loop detected, skipping...")
                                 continue
-                            match_hash_cache[msg.session_info.target_id][matched_hash] = datetime.now().timestamp()
+                            match_hash_cache[msg.session_info.target_id][matched_hash] = ExpiringTempDict(
+                                exp=cooldown_time, root=False)
 
                             if enable_tos and rfunc.show_typing:
-                                await _check_temp_ban(msg)
+                                await _tos_temp_ban(msg)
                             if rfunc.show_typing:
                                 await _check_target_cooldown(msg)
                             if rfunc.required_superuser:
@@ -460,13 +466,13 @@ async def _execute_regex(msg: "Bot.MessageSession", modules, identify_str):
                             else:
                                 await rfunc.function(msg)  # 将msg传入下游模块
                             ExecutionLockList.remove(msg)
-                            raise FinishedException(msg.sent)  # if not using msg.finish
-                    except FinishedException as e:
-                        time_used = datetime.now() - time_start
+                            raise SessionFinished(msg.sent)  # if not using msg.finish
+                    except SessionFinished as e:
+                        time_used = time.perf_counter() - time_start
                         if rfunc.logging:
                             Logger.success(
                                 f"Successfully finished session from {identify_str}, returns: {str(e)}. "
-                                f"Times take up: {time_used}")
+                                f"Times take up: {time_used:06f}s")
 
                         Info.command_parsed += 1
                         if enable_analytics:
@@ -477,6 +483,9 @@ async def _execute_regex(msg: "Bot.MessageSession", modules, identify_str):
                                                        module_type="regex")
                         continue
 
+                    except ExternalException as e:
+                        await _process_external_exception(msg, e)
+
                     except NoReportException as e:
                         await _process_noreport_exception(msg, e)
 
@@ -484,11 +493,14 @@ async def _execute_regex(msg: "Bot.MessageSession", modules, identify_str):
                         await _process_tos_abuse_warning(msg, e)
 
                     except Exception as e:
-                        await _process_exception(msg, e)
+                        if "timeout" in str(e).lower().replace(" ", ""):
+                            await _process_external_exception(msg, e)
+                        else:
+                            await _process_exception(msg, e)
                     finally:
                         if _typing:
                             await msg.end_typing()
-                            ExecutionLockList.remove(msg)
+                        ExecutionLockList.remove(msg)
 
         except SendMessageFailed:
             await _process_send_message_failed(msg)
@@ -498,63 +510,67 @@ async def _execute_regex(msg: "Bot.MessageSession", modules, identify_str):
 async def _check_target_cooldown(msg: "Bot.MessageSession"):
     cooldown_time = int(msg.session_info.target_info.target_data.get("cooldown_time", 0))
 
-    if cooldown_time and not await msg.check_permission():
-        if sender_cooldown := cooldown_counter.setdefault(msg.session_info.target_id, {}).get(
-                msg.session_info.sender_id):
-            elapsed = datetime.now().timestamp() - sender_cooldown["ts"]
-            if elapsed <= cooldown_time:
-                if not sender_cooldown.get("notified", False):
-                    sender_cooldown["notified"] = True
-                    await msg.finish(I18NContext("message.cooldown.manual", time=int(cooldown_time - elapsed)))
-                await msg.finish()
-            sender_cooldown.update({"ts": datetime.now().timestamp(), "notified": False})
-        else:
-            cooldown_counter[msg.session_info.target_id] = {
-                msg.session_info.sender_id: {"ts": datetime.now().timestamp(), "notified": False}}
+    if not cooldown_time or await msg.check_permission():
+        return
+
+    target_record = target_cooldown_counter[msg.session_info.target_id]
+    sender_record = target_record.setdefault(
+        msg.session_info.sender_id, ExpiringTempDict(exp=cooldown_time, root=False)
+    )
+    if not sender_record.is_expired():
+        if not sender_record.get("notified", False):
+            sender_record["notified"] = True
+            elapsed = cooldown_time - (time.time() - sender_record.ts)
+            await msg.finish(I18NContext("message.cooldown.manual", time=int(elapsed)))
+        await msg.finish()
+
+    sender_record.refresh()
+    sender_record["notified"] = False
+    sender_record.exp = cooldown_time
 
 
-async def _check_temp_ban(msg: "Bot.MessageSession"):
-    is_temp_banned = temp_ban_counter.get(msg.session_info.sender_id)
-    if is_temp_banned:
+async def _tos_temp_ban(msg: "Bot.MessageSession"):
+    ban_info = temp_ban_counter.get(msg.session_info.sender_id)
+    if ban_info and not ban_info.is_expired():
         if msg.check_super_user():
             await remove_temp_ban(msg.session_info.sender_id)
             return None
-        ban_time = datetime.now().timestamp() - is_temp_banned["ts"]
-        if ban_time < TOS_TEMPBAN_TIME:
-            if is_temp_banned["count"] < 2:
-                is_temp_banned["count"] += 1
-                await msg.finish(I18NContext("tos.message.tempbanned", ban_time=int(TOS_TEMPBAN_TIME - ban_time)))
-            elif is_temp_banned["count"] <= 3:
-                is_temp_banned["count"] += 1
-                await msg.finish(
-                    I18NContext("tos.message.tempbanned.warning", ban_time=int(TOS_TEMPBAN_TIME - ban_time)))
-            else:
-                raise AbuseWarning("{I18N:tos.message.reason.ignore}")
+        ban_time = time.time() - ban_info.ts
+        remaining = int(TOS_TEMPBAN_TIME - ban_time)
+
+        if not ban_info.get("count", 0):
+            ban_info["count"] = 0
+
+        if ban_info["count"] < 2:
+            ban_info["count"] += 1
+            await msg.finish(I18NContext("tos.message.tempbanned", ban_time=remaining))
+        elif ban_info["count"] <= 3:
+            ban_info["count"] += 1
+            await msg.finish(
+                I18NContext("tos.message.tempbanned.warning", ban_time=remaining))
+        else:
+            raise AbuseWarning("{I18N:tos.message.reason.ignore}")
 
 
 async def _tos_msg_counter(msg: "Bot.MessageSession", command: str):
-    same = counter_same.get(msg.session_info.sender_id)
-    if not same or datetime.now().timestamp() - same["ts"] > 300 or same["command"] != command:
-        # 检查是否滥用（5分钟内重复使用同一命令10条）
+    bucket_same = buckets_same[msg.session_info.sender_id][command]
+    if "bucket" not in bucket_same:
+        bucket_same["bucket"] = TokenBucket(10, 300)
 
-        counter_same[msg.session_info.sender_id] = {"command": command, "count": 1,
-                                                    "ts": datetime.now().timestamp()}
-    else:
-        same["count"] += 1
-        if same["count"] > 10:
-            raise AbuseWarning("{I18N:tos.message.reason.cooldown}")
-    all_ = counter_all.get(msg.session_info.sender_id)
-    if not all_ or datetime.now().timestamp() - all_["ts"] > 300:  # 检查是否滥用（5分钟内使用20条命令）
-        counter_all[msg.session_info.sender_id] = {"count": 1,
-                                                   "ts": datetime.now().timestamp()}
-    else:
-        all_["count"] += 1
-        if all_["count"] > 20:
-            raise AbuseWarning("{I18N:tos.message.reason.abuse}")
+    if not bucket_same["bucket"].consume():
+        raise AbuseWarning("{I18N:tos.message.reason.cooldown}")
+
+    bucket_all = buckets_all[msg.session_info.sender_id]
+    if "bucket" not in bucket_all:
+        bucket_all["bucket"] = TokenBucket(20, 300)
+
+    if not bucket_all["bucket"].consume():
+        raise AbuseWarning("{I18N:tos.message.reason.abuse}")
 
 
 async def _execute_module_command(msg: "Bot.MessageSession", module, command_first_word):
     bot: "Bot" = exports["Bot"]
+    _typing = False
     try:
         command_parser = CommandParser(module, msg=msg, module_name=command_first_word,
                                        command_prefixes=msg.session_info.prefixes)
@@ -574,7 +590,7 @@ async def _execute_module_command(msg: "Bot.MessageSession", module, command_fir
                     return
             elif command.required_admin:
                 if not await msg.check_permission():
-                    await msg.send_message(I18NContext("parser.admin.command.permission.denied"))
+                    await msg.send_message(I18NContext("parser.admin.permission.denied.command"))
                     return
 
             if not command.load or \
@@ -639,26 +655,31 @@ async def _execute_module_command(msg: "Bot.MessageSession", module, command_fir
 
             if msg.session_info.target_info.target_data.get("typing_prompt", True):
                 await msg.start_typing()
+                _typing = True
             await parsed_msg[0].function(**kwargs)  # 将msg传入下游模块
 
-            raise FinishedException(msg.sent)  # if not using msg.finish
+            raise SessionFinished(msg.sent)  # if not using msg.finish
         except InvalidCommandFormatError:
             if not msg.session_info.sender_info.sender_data.get("typo_check", True):
-                await msg.send_message(I18NContext("parser.command.invalid.format",
+                await msg.send_message(I18NContext("parser.command.invalid.syntax",
                                                    module=command_first_word,
                                                    prefix=msg.session_info.prefixes[0]))
             return
+        except Exception as e:
+            raise e
     except InvalidHelpDocTypeError:
         Logger.exception()
         await msg.send_message(I18NContext("error.module.helpdoc_invalid", module=command_first_word))
         return
+    finally:
+        if _typing:
+            await msg.end_typing()
 
 
 async def _process_tos_abuse_warning(msg: "Bot.MessageSession", e: AbuseWarning):
     if enable_tos and Config("tos_warning_counts", 5) >= 1 and not msg.check_super_user():
         await abuse_warn_target(msg, str(e))
-        temp_ban_counter[msg.session_info.sender_id] = {"count": 1,
-                                                        "ts": datetime.now().timestamp()}
+        temp_ban_counter[msg.session_info.sender_id] = {"count": 1, "ts": time.time()}
     else:
         err_msg_chain = MessageChain.assign(I18NContext("error.message.prompt"))
         err_msg_chain.append(Plain(msg.session_info.locale.t_str(str(e))))
@@ -681,6 +702,18 @@ async def _process_noreport_exception(msg: "Bot.MessageSession", e: NoReportExce
     await msg.send_message(err_msg_chain)
 
 
+async def _process_external_exception(msg: "Bot.MessageSession", e: Exception):
+    Logger.exception()
+    err_msg_chain = MessageChain.assign(I18NContext("error.message.prompt"))
+    err_msg = msg.session_info.locale.t_str(str(e))
+    err_msg_chain += match_kecode(err_msg)
+    err_msg_chain.append(I18NContext("error.message.prompt.external"))
+    if bug_report_url:
+        err_msg_chain.append(I18NContext("error.message.prompt.address", url=bug_report_url))
+    await msg.handle_error_signal()
+    await msg.send_message(err_msg_chain)
+
+
 async def _process_exception(msg: "Bot.MessageSession", e: Exception):
     bot: "Bot" = exports["Bot"]
     tb = traceback.format_exc()
@@ -688,30 +721,12 @@ async def _process_exception(msg: "Bot.MessageSession", e: Exception):
     err_msg_chain = MessageChain.assign(I18NContext("error.message.prompt"))
     err_msg = msg.session_info.locale.t_str(str(e))
     err_msg_chain += match_kecode(err_msg)
-    await msg.handle_error_signal()
-
-    external = False
-    if "timeout" in err_msg.lower().replace(" ", ""):
-        external = True
-    else:
-        try:
-            status_code = int(str(e).strip().split("[")[0])
-            expected_msg = f"{status_code}[KE:Image,path=https://http.cat/{status_code}.jpg]"
-            if err_msg == expected_msg and 500 <= status_code < 600:
-                external = True
-        except Exception:
-            pass
-
-    if external:
-        err_msg_chain.append(I18NContext("error.message.prompt.external"))
-    else:
-        err_msg_chain.append(I18NContext("error.message.prompt.report"))
-
+    err_msg_chain.append(I18NContext("error.message.prompt.report"))
     if bug_report_url:
         err_msg_chain.append(I18NContext("error.message.prompt.address", url=bug_report_url))
+    await msg.handle_error_signal()
     await msg.send_message(err_msg_chain)
-
-    if not external and report_targets:
+    if report_targets:
         for target in report_targets:
             if f := await bot.fetch_target(target):
                 await bot.send_direct_message(f, [I18NContext("error.message.report", command=msg.trigger_msg),
@@ -741,35 +756,36 @@ async def _command_typo_check(msg: "Bot.MessageSession", modules, command_first_
         Logger.debug(f"Match module: {command_first_word} -> {match_close_module[0]}")
         module: Module = modules[match_close_module[0]]
 
-        none_doc = True  # 检查模块绑定的命令是否有文档
+        none_template = True  # 检查模块绑定的命令是否有文档
         for func in module.command_list.get(msg.session_info.target_from):
-            if func.help_doc:
-                none_doc = False
+            if func.command_template:
+                none_template = False
 
         command_split = msg.trigger_msg.split(" ")
         len_command_split = len(command_split)
-        if not none_doc and len_command_split > 1:
-            get_commands: List[CommandMeta] = module.command_list.get(msg.session_info.target_from)
-            docs = {}  # 根据命令模板的空格数排序命令
+        if not none_template and len_command_split > 1:
+            get_commands: list[CommandMeta] = module.command_list.get(msg.session_info.target_from)
+            command_templates = {}  # 根据命令模板的空格数排序命令
             for func in get_commands:
-                help_doc: List[argsTemplate] = copy.deepcopy(func.help_doc)
-                for h_ in help_doc:
-                    h_.args_ = [a for a in h_.args if isinstance(a, ArgumentPattern)]
-                    if (len_args := len(h_.args)) not in docs:
-                        docs[len_args] = [h_]
+                command_template: list[argsTemplate] = copy.deepcopy(func.command_template)
+                for ct in command_template:
+                    ct.args_ = [a for a in ct.args if isinstance(a, ArgumentPattern)]
+                    if (len_args := len(ct.args)) not in command_templates:
+                        command_templates[len_args] = [ct]
                     else:
-                        docs[len_args].append(h_)
+                        command_templates[len_args].append(ct)
 
-            if len_command_split - 1 > len(docs):  # 如果空格数远大于命令模板的空格数
-                select_docs = docs[max(docs)]
+            if len_command_split - 1 > len(command_templates):  # 如果空格数远大于命令模板的空格数
+                select_templates = command_templates[max(command_templates)]
             else:
                 try:
-                    select_docs = docs[len_command_split - 1]  # 选择匹配的命令组
+                    select_templates = command_templates[len_command_split - 1]  # 选择匹配的命令组
                 except KeyError:
                     # 找一个最接近的命令模板
-                    select_docs = docs[max(docs.keys(), key=lambda k: min(abs(k - (len_command_split - 1)), k))]
+                    select_templates = command_templates[max(
+                        command_templates.keys(), key=lambda k: min(abs(k - (len_command_split - 1)), k))]
             match_close_command: list = difflib.get_close_matches(
-                " ".join(command_split[1:]), templates_to_str(select_docs), 1, typo_check_command_score)  # 进一步匹配命令
+                " ".join(command_split[1:]), templates_to_str(select_templates), 1, typo_check_command_score)  # 进一步匹配命令
             if match_close_command:
                 Logger.debug(f"Match command: {" ".join(command_split[1:])} -> {match_close_command[0]}")
                 match_split = match_close_command[0]
@@ -846,4 +862,4 @@ async def _command_typo_check(msg: "Bot.MessageSession", modules, command_first_
                 return None, None, True
     return None, None, False
 
-__all__ = ["parser", "check_temp_ban", "remove_temp_ban"]
+__all__ = ["parser"]

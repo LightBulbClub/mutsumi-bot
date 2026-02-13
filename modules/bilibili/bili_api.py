@@ -2,7 +2,7 @@ import orjson
 
 from core.builtins.bot import Bot
 from core.builtins.message.internal import Embed, EmbedField, Image, Url, I18NContext
-from core.utils.message import truncate_text
+from core.utils.func import truncate_text
 from core.web_render import web_render, SourceOptions
 
 DESC_LENGTH = 100
@@ -15,9 +15,7 @@ async def get_video_info(
         use_embed = True
     try:
         url = f"https://api.bilibili.com/x/web-interface/view/detail{query}"
-        res = await web_render.source(SourceOptions(url=url, raw_text=True, stealth=False))
-        if not res:
-            res = await web_render.source(SourceOptions(url=url, raw_text=True))
+        res = await web_render.source(SourceOptions(url=url, raw_text=True, stealth=True))
         if res:
             load_json = orjson.loads(res)
             if load_json["code"] != 0:
@@ -26,9 +24,9 @@ async def get_video_info(
                 return I18NContext("bilibili.message.not_found")
         else:
             return I18NContext("bilibili.message.failed")
-    except ValueError as e:
-        # if str(e).startswith("412"):
-        #     return I18NContext("bilibili.message.error.rejected")
+    except orjson.JSONDecodeError:
+        return I18NContext("bilibili.message.error.rejected")
+    except Exception as e:
         raise e
 
     view = load_json["data"]["View"]
