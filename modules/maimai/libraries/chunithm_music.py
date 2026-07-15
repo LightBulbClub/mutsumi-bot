@@ -15,11 +15,11 @@ def process_lxns_to_diving_fish(data):
     result = []
     for song in data.get("songs", []):
         basic_info = {
-            "artist": song["artist"],
-            "bpm": song["bpm"],
-            "from": version_map.get(song["version"], "Unknown"),
-            "genre": song["genre"],
-            "title": song["title"]
+            "artist": song.get("artist", ""),
+            "bpm": song.get("bpm", 0),
+            "from": version_map.get(song.get("version", ""), "Unknown"),
+            "genre": song.get("genre", ""),
+            "title": song.get("title", ""),
         }
 
         charts = []
@@ -32,31 +32,28 @@ def process_lxns_to_diving_fish(data):
                 diff["notes"].get("hold", 0),
                 diff["notes"].get("slide", 0),
                 diff["notes"].get("air", 0),
-                diff["notes"].get("flick", 0)
+                diff["notes"].get("flick", 0),
             ]
 
             charter_name = diff.get("note_designer", "")
-            charts.append({
-                "charter": charter_name,
-                "notes": notes_ordered
-            })
+            charts.append({"charter": charter_name, "notes": notes_ordered})
 
             ds.append(diff.get("star", float(diff.get("level_value", 0.0))))
             levels.append(diff.get("kanji", diff.get("level", "")))
 
-        title_with_kanji = song["title"]
+        title_with_kanji = song.get("title", "")
         kanji_list = [diff.get("kanji") for diff in song.get("difficulties", []) if "kanji" in diff]
         if kanji_list:
-            title_with_kanji = f"[{kanji_list[0]}]{song["title"]}"
+            title_with_kanji = f"[{kanji_list[0]}]{song.get('title', '')}"
             basic_info["title"] = title_with_kanji
 
         song_entry = {
             "basic_info": basic_info,
             "charts": charts,
             "ds": ds,
-            "id": song["id"],
+            "id": song.get("id", ""),
             "level": levels,
-            "title": title_with_kanji
+            "title": title_with_kanji,
         }
 
         result.append(song_entry)
@@ -119,19 +116,19 @@ class Chart(dict):
 
     def __getattribute__(self, item):
         if item == "tap":
-            return self["notes"][0]
+            return self.get("notes", [0])[0] if len(self.get("notes", [])) > 0 else 0
         if item == "hold":
-            return self["notes"][1]
+            return self.get("notes", [0])[1] if len(self.get("notes", [])) > 1 else 0
         if item == "slide":
-            return self["notes"][2]
+            return self.get("notes", [0])[2] if len(self.get("notes", [])) > 2 else 0
         if item == "air":
-            return self["notes"][3]
+            return self.get("notes", [0])[3] if len(self.get("notes", [])) > 3 else 0
         if item == "flick":
-            return self["notes"][4]
+            return self.get("notes", [0])[4] if len(self.get("notes", [])) > 4 else 0
         if item == "total":
-            return sum(self["notes"])
+            return sum(self.get("notes", []))
         if item == "charter":
-            return self["charter"]
+            return self.get("charter", "")
         return super().__getattribute__(item)
 
 
@@ -150,8 +147,8 @@ class Music(dict):
     def __getattribute__(self, item):
         if item in {"genre", "artist", "bpm", "version"}:
             if item == "version":
-                return self["basic_info"]["from"]
-            return self["basic_info"][item]
+                return self.get("basic_info", {}).get("from", "")
+            return self.get("basic_info", {}).get(item, "")
         if item in self:
             return self[item]
         return super().__getattribute__(item)

@@ -1,11 +1,12 @@
-import random as pyrandom
 from typing import Sequence, MutableSequence, TypeVar
+
+import random as pyrandom  # skipcq
 
 T = TypeVar("T")
 
 
 class Random:
-    def __init__(self, seed=0):
+    def __init__(self, seed: int | float | str | bytes | bytearray = 0):
         pyrandom.seed(seed)
 
     @classmethod

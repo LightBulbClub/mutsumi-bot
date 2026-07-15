@@ -1,19 +1,25 @@
+from __future__ import annotations
+
 import base64
 from io import BytesIO
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PIL import Image as PILImage
 from jinja2 import FileSystemLoader, Environment
 
 from core.builtins.message.chain import MessageChain, MessageNodes
 from core.builtins.message.elements import PlainElement, ImageElement, EmbedElement
-from core.builtins.session.info import SessionInfo, FetchedSessionInfo
-from core.builtins.session.internal import MessageSession
 from core.config import Config
 from core.constants.path import templates_path
 from core.logger import Logger
 from core.utils.cache import random_cache_path
 from core.web_render import web_render, ElementScreenshotOptions
+
+if TYPE_CHECKING:
+    from core.builtins.session.internal import MessageSession
+    from core.builtins.session.info import SessionInfo, FetchedSessionInfo
+
 
 env = Environment(loader=FileSystemLoader(templates_path), autoescape=True, enable_async=True)
 use_font_mirror = Config("use_font_mirror", False, bool)
@@ -62,8 +68,9 @@ def cb64imglst(b64imglst: list[str], bot_img=False) -> list[PILImage.Image | Ima
 save_source = True
 
 
-async def msgnode2image(message_node: MessageNodes,
-                        session: MessageSession | SessionInfo | FetchedSessionInfo | None = None):
+async def msgnode2image(
+    message_node: MessageNodes, session: MessageSession | SessionInfo | FetchedSessionInfo | None = None
+):
     new_chain_list = []
     for m in message_node.values:
         for x in m.as_sendable(session):
@@ -72,8 +79,9 @@ async def msgnode2image(message_node: MessageNodes,
     return await msgchain2image(message_chain, session)
 
 
-async def msgchain2image(message_chain: list | MessageChain,
-                         session: MessageSession | SessionInfo | FetchedSessionInfo | None = None) -> list[ImageElement] | bool:
+async def msgchain2image(
+    message_chain: list | MessageChain, session: MessageSession | SessionInfo | FetchedSessionInfo | None = None
+) -> list[ImageElement] | bool:
     """使用WebRender将消息链转换为图片。
 
     :param message_chain: 消息链或消息链列表。
@@ -84,8 +92,6 @@ async def msgchain2image(message_chain: list | MessageChain,
     if isinstance(message_chain, list):
         message_chain = MessageChain.assign(message_chain)
 
-    if isinstance(session, MessageSession):
-        session = session.session_info
     message_list = message_chain.as_sendable(session)
     for m in message_list:
         if isinstance(m, ImageElement):
@@ -97,13 +103,15 @@ async def msgchain2image(message_chain: list | MessageChain,
     if session:
         title = session.locale.t("message.list")
 
-    html_content = await env.get_template("msgchain_to_image.html").render_async(title=title,
-                                                                                 message_list=message_list,
-                                                                                 isinstance=isinstance,
-                                                                                 PlainElement=PlainElement,
-                                                                                 ImageElement=ImageElement,
-                                                                                 EmbedElement=EmbedElement,
-                                                                                 use_font_mirror=use_font_mirror, )
+    html_content = await env.get_template("msgchain_to_image.html").render_async(
+        title=title,
+        message_list=message_list,
+        isinstance=isinstance,
+        PlainElement=PlainElement,
+        ImageElement=ImageElement,
+        EmbedElement=EmbedElement,
+        use_font_mirror=use_font_mirror,
+    )
     fname = f"{random_cache_path()}.html"
     with open(fname, "w", encoding="utf-8") as fi:
         fi.write(html_content)
@@ -127,15 +135,17 @@ async def svg_render(file_path: str | Path) -> list[ImageElement] | bool:
     with open(file_path, "r", encoding="utf-8") as file:
         svg_content = file.read()
 
-    html_content = await env.get_template("svg_template.html").render_async(svg=svg_content,
-                                                                            use_font_mirror=use_font_mirror)
+    html_content = await env.get_template("svg_template.html").render_async(
+        svg=svg_content, use_font_mirror=use_font_mirror
+    )
 
     fname = f"{random_cache_path()}.html"
     with open(fname, "w", encoding="utf-8") as fi:
         fi.write(html_content)
 
     pic_list = await web_render.element_screenshot(
-        ElementScreenshotOptions(content=html_content, element=[".botbox"], counttime=False, output_type="png"))
+        ElementScreenshotOptions(content=html_content, element=[".botbox"], counttime=False, output_type="png")
+    )
     if not pic_list:
         Logger.exception("[WebRender] Generation Failed.")
         return False

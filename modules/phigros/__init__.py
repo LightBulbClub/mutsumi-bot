@@ -1,18 +1,19 @@
+from pathlib import Path
+
 import orjson
 
 from core.builtins.bot import Bot
 from core.builtins.message.chain import MessageChain
 from core.builtins.message.internal import Image, I18NContext, Plain
 from core.component import module
-from core.constants.path import assets_path
 from core.utils.http import get_url
 from core.utils.random import Random
 from .database.models import PhigrosBindInfo
 from .libraries.genb30 import get_b30
-from .libraries.update import remove_punctuations, update_assets, p_headers
 from .libraries.record import get_game_record
+from .libraries.update import remove_punctuations, update_assets, p_headers
 
-pgr_assets_path = assets_path / "modules" / "phigros"
+pgr_assets_path = Path(__file__).parent / "assets"
 song_info_path = pgr_assets_path / "song_info.json"
 
 phi = module(
@@ -37,9 +38,7 @@ async def _(msg: Bot.MessageSession, sessiontoken: str):
         "Telegram|Supergroup",
     ]:
         await msg.send_message(I18NContext("phigros.message.bind.warning"), quote=False)
-        deleted = await msg.delete()
-        if not deleted:
-            await msg.send_message(I18NContext("phigros.message.bind.delete_failed"), quote=False)
+        await msg.delete()
     headers = p_headers.copy()
     headers["X-LC-Session"] = sessiontoken
     try:
@@ -50,8 +49,9 @@ async def _(msg: Bot.MessageSession, sessiontoken: str):
         )
         if get_user_info:
             username = get_user_info.get("nickname", "Guest")
-            await PhigrosBindInfo.set_bind_info(sender_id=msg.session_info.sender_id, session_token=sessiontoken,
-                                                username=username)
+            await PhigrosBindInfo.set_bind_info(
+                sender_id=msg.session_info.sender_id, session_token=sessiontoken, username=username
+            )
             await msg.finish(I18NContext("phigros.message.bind.success", username=username), quote=False)
         else:
             await msg.finish(I18NContext("phigros.message.bind.failed"), quote=False)
@@ -71,7 +71,7 @@ async def _(msg: Bot.MessageSession):
     if not bind_info:
         await msg.finish(I18NContext("phigros.message.user_unbound", prefix=msg.session_info.prefixes[0]))
     if not song_info_path.exists():
-        await msg.finish(I18NContext("phigros.message.file_not_found"))
+        await msg.finish(I18NContext("phigros.message.file_not_found", prefix=msg.session_info.prefixes[0]))
 
     img = await get_b30(msg, bind_info.username, bind_info.session_token)
     if img:
@@ -101,13 +101,13 @@ def get_rank(score: int, full_combo: bool) -> str:
 @phi.command("random {{I18N:phigros.help.random}}")
 async def _(msg: Bot.MessageSession):
     if not song_info_path.exists():
-        await msg.finish(I18NContext("phigros.message.file_not_found"))
+        await msg.finish(I18NContext("phigros.message.file_not_found", prefix=msg.session_info.prefixes[0]))
 
     msg_chain = MessageChain.assign()
     with open(song_info_path, "rb") as f:
         song_info = orjson.loads(f.read())
     sid, sinfo = Random.choice(list(song_info.items()))
-    illustration_path = pgr_assets_path / "illustration" / f"{sid.split(".")[0]}.png"
+    illustration_path = pgr_assets_path / "illustration" / f"{sid.split('.')[0]}.png"
     if illustration_path.exists():
         msg_chain.append(Image(illustration_path))
 
@@ -124,13 +124,13 @@ async def _(msg: Bot.MessageSession, song_name: str):
     if not bind_info:
         await msg.finish(I18NContext("phigros.message.user_unbound", prefix=msg.session_info.prefixes[0]))
     if not song_info_path.exists():
-        await msg.finish(I18NContext("phigros.message.file_not_found"))
+        await msg.finish(I18NContext("phigros.message.file_not_found", prefix=msg.session_info.prefixes[0]))
 
     msg_chain = MessageChain.assign()
     game_records: dict = await get_game_record(msg, bind_info.session_token)
     for sid, record in game_records.items():
         if remove_punctuations(record.get("name").lower()) == remove_punctuations(song_name.lower()):
-            illustration_path = pgr_assets_path / "illustration" / f"{sid.split(".")[0]}.png"
+            illustration_path = pgr_assets_path / "illustration" / f"{sid.split('.')[0]}.png"
             if illustration_path.exists():
                 msg_chain.append(Image(illustration_path))
 

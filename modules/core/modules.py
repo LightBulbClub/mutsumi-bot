@@ -7,7 +7,6 @@ from core.component import module
 from core.config import Config
 from core.constants.exceptions import InvalidHelpDocTypeError
 from core.database.models import ModuleStatus
-from core.i18n import load_locale_file
 from core.loader import ModulesManager
 from .help import modules_list_help
 
@@ -21,27 +20,20 @@ m = module(
         "reload": "module reload",
         "unload": "module unload",
     },
-    doc=True
+    doc=True,
 )
 
 
+@m.command(["reload <module> ...", "load <module> ...", "unload <module> ..."], required_superuser=True)
+@m.command("list [--legacy] {{I18N:core.help.module.list}}", options_desc={"--legacy": "{I18N:help.option.legacy}"})
 @m.command(
-    ["reload <module> ...",
-     "load <module> ...",
-     "unload <module> ..."
-     ],
-    required_superuser=True
-)
-@m.command("list [--legacy] {{I18N:core.help.module.list}}",
-           options_desc={"--legacy": "{I18N:help.option.legacy}"}
-           )
-@m.command(
-    ["enable <module>... {{I18N:core.help.module.enable}}",
-     "enable all {{I18N:core.help.module.enable_all}}",
-     "disable <module>... {{I18N:core.help.module.disable}}",
-     "disable all {{I18N:core.help.module.disable_all}}"
-     ],
-    required_admin=True
+    [
+        "enable <module>... {{I18N:core.help.module.enable}}",
+        "enable all {{I18N:core.help.module.enable_all}}",
+        "disable <module>... {{I18N:core.help.module.disable}}",
+        "disable all {{I18N:core.help.module.disable_all}}",
+    ],
+    required_admin=True,
 )
 async def _(msg: Bot.MessageSession):
     if msg.parsed_msg.get("list", False):
@@ -56,8 +48,8 @@ async def config_modules(msg: Bot.MessageSession):
     is_superuser = msg.check_super_user()
     alias = ModulesManager.modules_aliases
     modules_ = ModulesManager.return_modules_list(
-        target_from=msg.session_info.target_from,
-        client_name=msg.session_info.client_name)
+        target_from=msg.session_info.target_from, client_name=msg.session_info.client_name
+    )
     enabled_modules_list = deepcopy(msg.session_info.target_info.modules)
     wait_config = [msg.parsed_msg.get("<module>")] + msg.parsed_msg.get("...", [])
     wait_config_list = []
@@ -78,11 +70,7 @@ async def config_modules(msg: Bot.MessageSession):
             for function in modules_:
                 if function[0] == "_":
                     continue
-                if (
-                    modules_[function].base
-                    or modules_[function].hidden
-                    or modules_[function].required_superuser
-                ):
+                if modules_[function].base or modules_[function].hidden or modules_[function].required_superuser:
                     continue
                 if modules_[function].rss and not msg.session_info.support_rss:
                     continue
@@ -123,9 +111,7 @@ async def config_modules(msg: Bot.MessageSession):
                     recommend_modules_help_doc_list.append(I18NContext("core.message.module.recommends.help", module=m))
 
                     if modules_[m].desc:
-                        recommend_modules_help_doc_list.append(
-                            Plain(msg.session_info.locale.t_str(modules_[m].desc))
-                        )
+                        recommend_modules_help_doc_list.append(Plain(msg.session_info.locale.t_str(modules_[m].desc)))
                     hdoc = CommandParser(
                         modules_[m],
                         msg=msg,
@@ -215,11 +201,6 @@ async def config_modules(msg: Bot.MessageSession):
                     ):
                         await msg.finish()
                 msglist.append(await module_reload(module_, extra_reload_modules, base_module))
-
-        locale_err = load_locale_file()
-        if len(locale_err) != 0:
-            msglist.append(I18NContext("core.message.locale.reload.failed"))
-            msglist.append(Plain("\n".join(locale_err), disable_joke=True))
     elif msg.parsed_msg.get("load", False):
         for module_ in wait_config_list:
             if module_ not in await ModuleStatus.get_unloaded_modules():
@@ -248,8 +229,9 @@ async def config_modules(msg: Bot.MessageSession):
             await msg.send_message(msglist)
     if recommend_modules_help_doc_list:
         if await msg.wait_confirm(
-            [I18NContext("core.message.module.recommends", modules="\n".join(recommend_modules_list)),
-             Plain("\n")] + recommend_modules_help_doc_list):
+            [I18NContext("core.message.module.recommends", modules="\n".join(recommend_modules_list))]
+            + recommend_modules_help_doc_list
+        ):
             if await msg.session_info.target_info.config_module(recommend_modules_list, True):
                 msglist = []
                 for x in recommend_modules_list:

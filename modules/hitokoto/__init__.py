@@ -19,7 +19,6 @@ hitokoto = module(
 )
 
 
-@hitokoto.command()
 @hitokoto.command("[<msg_type>] {{I18N:hitokoto.help.type}}")
 async def _(msg: Bot.MessageSession, msg_type: str = None):
     api = "https://v1.hitokoto.cn/"
@@ -33,15 +32,14 @@ async def _(msg: Bot.MessageSession, msg_type: str = None):
 
     if msg.session_info.locale.locale == "zh_tw":
         data = {
-            k: (
-                LanguageConverter.from_language(zh_tw).convert(v)
-                if isinstance(v, str)
-                else v
-            )
-            for k, v in data.items()
+            k: (LanguageConverter.from_language(zh_tw).convert(v) if isinstance(v, str) else v) for k, v in data.items()
         }
-    from_who = data["from_who"] or ""
-    tp = str(I18NContext("hitokoto.message.type")) + str(I18NContext(f"hitokoto.message.type.{data["type"]}"))
-    msg_chain = MessageChain.assign([Plain(f"{data["hitokoto"]}\n——{from_who}「{data["from"]}」\n{tp}"),
-                                     Url(f"https://hitokoto.cn?id={data["id"]}", use_mm=False)])
+    from_who = data.get("from_who") or ""
+    tp = str(I18NContext("hitokoto.message.type")) + str(I18NContext(f"hitokoto.message.type.{data.get('type', '')}"))
+    msg_chain = MessageChain.assign(
+        [
+            Plain(f"{data.get('hitokoto', '')}\n——{from_who}「{data.get('from', '')}」\n{tp}"),
+            Url(f"https://hitokoto.cn?id={data.get('id', '')}", use_mm=False),
+        ]
+    )
     await msg.finish(msg_chain)

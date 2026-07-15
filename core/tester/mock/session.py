@@ -1,8 +1,6 @@
 import asyncio
 import os
 
-from PIL import Image as PILImage
-
 from core.builtins.message.chain import get_message_chain, MessageChain
 from core.builtins.message.elements import PlainElement, ImageElement, MentionElement, BaseElement
 from core.builtins.session.info import SessionInfo
@@ -35,17 +33,18 @@ class MockMessageSession(MessageSession):
             sender_id="TEST|0",
             sender_from="TEST",
             sender_name="TEST",
-            messages=MessageChain.assign(msg)
+            messages=MessageChain.assign(msg),
         )
 
     async def send_message(
-            self,
-            message_chain,
-            quote=True,
-            disable_secret_check=False,
-            enable_parse_message=True,
-            enable_split_image=True,
-            callback=None):
+        self,
+        message_chain,
+        quote=True,
+        disable_secret_check=False,
+        enable_parse_message=True,
+        enable_split_image=True,
+        callback=None,
+    ):
         message = get_message_chain(self.session_info, chain=message_chain)
 
         for x in message.as_sendable(self.session_info, parse_message=enable_parse_message):
@@ -53,10 +52,6 @@ class MockMessageSession(MessageSession):
             if isinstance(x, PlainElement):
                 self.action.append(x.text)
             elif isinstance(x, ImageElement):
-                image_path = await x.get()
-                if not self.is_ci:
-                    img = PILImage.open(image_path)
-                    img.show()
                 self.action.append(str(x))
             elif isinstance(x, MentionElement):
                 self.action.append(f"<@{x.client}|{str(x.id)}>")
@@ -68,42 +63,39 @@ class MockMessageSession(MessageSession):
             self.parent_session.action.extend(self.action)
 
     async def finish(
-            self,
-            message_chain=None,
-            quote=True,
-            disable_secret_check=False,
-            enable_parse_message=True,
-            enable_split_image=True,
-            callback=None):
+        self,
+        message_chain=None,
+        quote=True,
+        disable_secret_check=False,
+        enable_parse_message=True,
+        enable_split_image=True,
+        callback=None,
+    ):
         if message_chain:
             await self.send_message(message_chain)
         raise SessionFinished
 
     async def send_direct_message(
-            self,
-            message_chain,
-            disable_secret_check=False,
-            enable_parse_message=True,
-            enable_split_image=True,
-            callback=None):
+        self,
+        message_chain,
+        disable_secret_check=False,
+        enable_parse_message=True,
+        enable_split_image=True,
+        callback=None,
+    ):
         await self.send_message(message_chain)
 
-    async def delete(self):
-        self.action.append("(delete message)")
+    async def delete(self, reason=None):
+        self.action.append(f"(delete message{f': {reason}' if reason else ''})")
 
-    async def kick_member(self, user_id, ban=False):
+    async def restrict_member(self, user_id, duration=None, reason=None):
         if isinstance(user_id, str):
             user_id = [user_id]
 
         for x in user_id:
-            self.action.append(f"({"ban" if ban else "kick"} {x})")
-
-    async def restrict_member(self, user_id, duration):
-        if isinstance(user_id, str):
-            user_id = [user_id]
-
-        for x in user_id:
-            self.action.append(f"(restrict {x}{f" ({duration}s)" if duration else ""})")
+            self.action.append(
+                f"(restrict {x}{f' ({duration}s)' if duration else ''}{f': {reason}' if reason else ''})"
+            )
 
     async def unrestrict_member(self, user_id):
         if isinstance(user_id, str):
@@ -111,6 +103,27 @@ class MockMessageSession(MessageSession):
 
         for x in user_id:
             self.action.append(f"(unrestrict {x})")
+
+    async def kick_member(self, user_id, reason=None):
+        if isinstance(user_id, str):
+            user_id = [user_id]
+
+        for x in user_id:
+            self.action.append(f"(kick {x}{f': {reason}' if reason else ''})")
+
+    async def ban_member(self, user_id, reason=None):
+        if isinstance(user_id, str):
+            user_id = [user_id]
+
+        for x in user_id:
+            self.action.append(f"(ban {x}{f': {reason}' if reason else ''})")
+
+    async def unban_member(self, user_id):
+        if isinstance(user_id, str):
+            user_id = [user_id]
+
+        for x in user_id:
+            self.action.append(f"(unban {x})")
 
     async def add_reaction(self, emoji):
         self.action.append(f"(add reaction {emoji})")
@@ -137,13 +150,7 @@ class MockMessageSession(MessageSession):
         pass
 
     async def wait_confirm(
-        self,
-        message_chain=None,
-        quote=True,
-        delete=True,
-        timeout=120,
-        append_instruction=True,
-        no_confirm_action=True
+        self, message_chain=None, quote=True, delete=True, timeout=120, append_instruction=True, no_confirm_action=True
     ):
         if Config("no_confirm", False):
             return no_confirm_action
@@ -156,8 +163,9 @@ class MockMessageSession(MessageSession):
             message_chain.append(I18NContext("message.wait.confirm.prompt"))
         await self.send_message(message_chain)
         try:
-            confirm_prompt = "\n".join([x.text if isinstance(x, PlainElement) else str(x)
-                                       for x in message_chain.as_sendable()])
+            confirm_prompt = "\n".join(
+                [x.text if isinstance(x, PlainElement) else str(x) for x in message_chain.as_sendable()]
+            )
             if self._script:
                 result = self._script.pop(0)
                 if delete:
@@ -193,16 +201,17 @@ class MockMessageSession(MessageSession):
             if append_instruction:
                 message_chain.append(I18NContext("message.wait.next_message.prompt"))
             await self.send_message(message_chain, quote)
-            confirm_prompt = "\n".join([x.text if isinstance(x, PlainElement) else str(x)
-                                       for x in message_chain.as_sendable()])
+            confirm_prompt = "\n".join(
+                [x.text if isinstance(x, PlainElement) else str(x) for x in message_chain.as_sendable()]
+            )
         try:
             if self._script:
                 result = self._script.pop(0)
                 if delete:
                     await self.delete()
                 new_msg = MockMessageSession(parent_session=self, is_ci=self.is_ci)
+                # 新消息共享同一个脚本列表引用，不清空原始会话的脚本
                 new_msg._script = self._script
-                self._script = []
                 await new_msg.async_init(result)
                 return new_msg
 
@@ -233,8 +242,9 @@ class MockMessageSession(MessageSession):
         if message_chain:
             message_chain = get_message_chain(self.session_info, message_chain)
             await self.send_message(message_chain, quote)
-            confirm_prompt = "\n".join([x.text if isinstance(x, PlainElement) else str(x)
-                                       for x in message_chain.as_sendable()])
+            confirm_prompt = "\n".join(
+                [x.text if isinstance(x, PlainElement) else str(x) for x in message_chain.as_sendable()]
+            )
 
         try:
             if self._script:
@@ -242,8 +252,8 @@ class MockMessageSession(MessageSession):
                 if delete:
                     await self.delete()
                 new_msg = MockMessageSession(parent_session=self, is_ci=self.is_ci)
+                # 新消息共享同一个脚本列表引用，不清空原始会话的脚本
                 new_msg._script = self._script
-                self._script = []
                 await new_msg.async_init(result)
                 return new_msg
 
@@ -278,16 +288,17 @@ class MockMessageSession(MessageSession):
             if append_instruction:
                 message_chain.append(I18NContext("message.reply.prompt"))
             await self.send_message(message_chain, quote)
-            confirm_prompt = "\n".join([x.text if isinstance(x, PlainElement) else str(x)
-                                       for x in message_chain.as_sendable()])
+            confirm_prompt = "\n".join(
+                [x.text if isinstance(x, PlainElement) else str(x) for x in message_chain.as_sendable()]
+            )
         try:
             if self._script:
                 result = self._script.pop(0)
                 if delete:
                     await self.delete()
                 new_msg = MockMessageSession(parent_session=self, is_ci=self.is_ci)
+                # 新消息共享同一个脚本列表引用，不清空原始会话的脚本
                 new_msg._script = self._script
-                self._script = []
                 await new_msg.async_init(result)
                 return new_msg
 
@@ -315,3 +326,11 @@ class MockMessageSession(MessageSession):
 
     async def call_onebot_api(self, api_name, **kwargs):
         pass
+
+    def __eq__(self, other):
+        if isinstance(other, MockMessageSession):
+            return self.session_info.session_id == other.session_info.session_id
+        return False
+
+    def __hash__(self):
+        return hash(self.session_info.session_id)

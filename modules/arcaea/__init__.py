@@ -1,12 +1,13 @@
+from pathlib import Path
+
 import orjson
 
 from core.builtins.bot import Bot
 from core.builtins.message.internal import Image as BImage, Plain, I18NContext
 from core.component import module
-from core.constants.path import assets_path
 from core.web_render import web_render, SourceOptions
 
-arc_assets_path = assets_path / "modules" / "arcaea"
+arc_assets_path = Path(__file__).parent / "assets"
 
 arc = module(
     "arcaea",
@@ -21,35 +22,41 @@ arc = module(
 async def _(msg: Bot.MessageSession):
     url = "https://webapi.lowiro.com/webapi/serve/static/bin/arcaea/apk/"
     resp = await web_render.source(SourceOptions(url=url, raw_text=True))
-    if resp:
+    try:
         load_json = orjson.loads(resp)
-        url = load_json.get("value", {}).get("url")
-    if url:
-        await msg.finish(I18NContext("arcaea.message.download", version=load_json["value"]["version"], url=url))
-    else:
+    except Exception:
         await msg.finish(I18NContext("arcaea.message.get_failed"))
+    await msg.finish(
+        I18NContext(
+            "arcaea.message.download",
+            version=load_json.get("value", {}).get("version", ""),
+            url=load_json.get("value", {}).get("url", ""),
+        )
+    )
 
 
 @arc.command("random {{I18N:arcaea.help.random}}")
 async def _(msg: Bot.MessageSession):
     url = "https://webapi.lowiro.com/webapi/song/showcase/"
     resp = await web_render.source(SourceOptions(url=url, raw_text=True))
-    if resp:
+    try:
         load_json = orjson.loads(resp)
-        value = load_json["value"][0]
-        image = arc_assets_path / "jacket" / f"{value["song_id"]}.jpg"
-        result = [Plain(value["title"]["en"])]
-        if image.exists():
-            result.append(BImage(path=image))
-        await msg.finish(result)
-    else:
+    except Exception:
         await msg.finish(I18NContext("arcaea.message.get_failed"))
+    value_list = load_json.get("value", [])
+    if not value_list:
+        await msg.finish(I18NContext("arcaea.message.get_failed"))
+        return
+    value = value_list[0]
+    image = arc_assets_path / "jacket" / f"{value.get('song_id', '')}.jpg"
+    title = value.get("title", {})
+    result = [Plain(title.get("en", ""))]
+    if image.exists():
+        result.append(BImage(path=image))
+    await msg.finish(result)
 
 
-@arc.command(
-    "rank free {{I18N:arcaea.help.rank.free}}",
-    "rank paid {{I18N:arcaea.help.rank.paid}}"
-)
+@arc.command("rank free {{I18N:arcaea.help.rank.free}}", "rank paid {{I18N:arcaea.help.rank.paid}}")
 async def _(msg: Bot.MessageSession):
     if msg.parsed_msg.get("free", False):
         url = "https://webapi.lowiro.com/webapi/song/rank/free/"
@@ -57,16 +64,17 @@ async def _(msg: Bot.MessageSession):
     else:
         url = "https://webapi.lowiro.com/webapi/song/rank/paid/"
     resp = await web_render.source(SourceOptions(url=url, raw_text=True))
-    if resp:
+    try:
         load_json = orjson.loads(resp)
-        r = []
-        rank = 0
-        for x in load_json["value"]:
-            rank += 1
-            r.append(f"{rank}. {x["title"]["en"]} ({x["status"]})")
-        await msg.finish(r)
-    else:
+    except Exception:
         await msg.finish(I18NContext("arcaea.message.get_failed"))
+    r = []
+    rank = 0
+    for x in load_json.get("value", []):
+        rank += 1
+        title = x.get("title", {})
+        r.append(Plain(f"{rank}. {title.get('en', '')} ({x.get('status', '')})"))
+    await msg.finish(r)
 
 
 @arc.command("calc <score> <rating> {{I18N:arcaea.help.calc}}")

@@ -19,8 +19,9 @@
 
 from __future__ import print_function
 
-from datetime import date
 import struct
+from datetime import date
+from pathlib import Path
 
 from Crypto.Cipher import AES
 from Crypto.Hash import SHA256, HMAC
@@ -28,7 +29,6 @@ from Crypto.Util import Counter
 from Crypto.Util.number import bytes_to_long
 from Crypto.Util.strxor import strxor
 
-from core.constants.path import assets_path
 from core.utils.func import is_int
 
 
@@ -97,7 +97,7 @@ class MkeyGenerator:
     def __init__(self, debug=False):
         self._dbg = debug
 
-        self._data_path = assets_path / "modules" / "mkey" / "data"
+        self._data_path = Path(__file__).parent / "data"
 
     # Read AES key (v2).
     def _read_aes_key(self, file_name):
@@ -229,9 +229,7 @@ class MkeyGenerator:
             self._data_path = None
 
         if not self._data_path:
-            raise ValueError(
-                "v1/v2 attempted, but data directory doesn\'t exist or was not specified."
-            )
+            raise ValueError("v1/v2 attempted, but data directory doesn't exist or was not specified.")
 
         #
         # Extract key ID fields from inquiry number.
@@ -265,9 +263,7 @@ class MkeyGenerator:
             else:
                 file_name = props["mkey_file"] % (region, version)
 
-            (mkey_region, mkey_version, mkey_ctr, mkey_hmac_key) = self._read_mkey_file(
-                file_name
-            )
+            (mkey_region, mkey_version, mkey_ctr, mkey_hmac_key) = self._read_mkey_file(file_name)
 
             file_name = props["aes_file"] % region
             mkey_aes_key = self._read_aes_key(file_name)
@@ -353,19 +349,13 @@ class MkeyGenerator:
             self._data_path = None
 
         if not self._data_path:
-            raise ValueError(
-                "v3/v4 attempted, but data directory doesn\'t exist or was not specified."
-            )
+            raise ValueError("v3/v4 attempted, but data directory doesn't exist or was not specified.")
 
         if algorithm == "v4" and not aux:
-            raise ValueError(
-                "v4 attempted, but no auxiliary string (device ID required)."
-            )
+            raise ValueError("v4 attempted, but no auxiliary string (device ID required).")
 
         if algorithm == "v4" and len(aux) != 16:
-            raise ValueError(
-                "v4 attempted, but auxiliary string (device ID) of invalid length."
-            )
+            raise ValueError("v4 attempted, but auxiliary string (device ID) of invalid length.")
 
         if algorithm == "v4":
             version = int((inquiry / 10000) % 100)

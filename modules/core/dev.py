@@ -1,4 +1,3 @@
-import os
 from tabulate import tabulate
 from tortoise import Tortoise
 from tortoise.exceptions import OperationalError
@@ -8,8 +7,8 @@ from core.builtins.message.internal import I18NContext, Plain, Image
 from core.component import module
 from core.constants import dev_mode, NoReportException
 from core.database import fetch_module_db, get_model_fields, get_model_names
-from core.utils.image_table import image_table_render, ImageTable
 from core.utils.func import is_int
+from core.utils.image_table import image_table_render, ImageTable
 
 DBDATA_PER_PAGE = 10
 
@@ -75,20 +74,14 @@ async def _(msg: Bot.MessageSession, sql: str):
             total_pages = (len(data) + DBDATA_PER_PAGE - 1) // DBDATA_PER_PAGE
             get_page = msg.parsed_msg.get("-p", False)
 
-            page = (
-                max(min(int(get_page["<page>"]), total_pages), 1)
-                if get_page and is_int(get_page["<page>"])
-                else 1
-            )
+            page = max(min(int(get_page["<page>"]), total_pages), 1) if get_page and is_int(get_page["<page>"]) else 1
             start_index = (page - 1) * DBDATA_PER_PAGE
             end_index = page * DBDATA_PER_PAGE
             page_data = data[start_index:end_index]
 
             footer = I18NContext(
-                "core.message.database.pages",
-                page=page,
-                total_pages=total_pages,
-                data_count=len(data))
+                "core.message.database.pages", page=page, total_pages=total_pages, data_count=len(data)
+            )
 
             if not msg.parsed_msg.get("--legacy", False) and msg.session_info.support_image:
                 table = ImageTable(data=page_data, headers=headers, session_info=msg.session_info, disable_joke=True)

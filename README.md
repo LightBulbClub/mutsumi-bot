@@ -9,7 +9,7 @@ _图源 [秋月雪乃杏](https://space.bilibili.com/6851743)_
 
 
 ![Python](https://img.shields.io/badge/Python-3.12+-blue)
-![OneBot v11](https://img.shields.io/badge/OneBot-v11-black)
+![OneBot 11](https://img.shields.io/badge/OneBot-11-black)
 [![License](https://img.shields.io/github/license/Teahouse-Studios/akari-bot)](https://github.com/Teahouse-Studios/akari-bot/blob/master/LICENSE)
 </div>
 
@@ -41,7 +41,37 @@ _图源 [秋月雪乃杏](https://space.bilibili.com/6851743)_
 
 #### QQ第三方协议
 
+<<<<<<< HEAD
 由于腾讯风控问题，请[在此提交](https://github.com/LightBulbClub/mutsumi-bot/issues/new?assignees=OasisAkari&labels=New&template=add_new_group.yaml&title=%5BNEW%5D%3A+)入群申请。
+=======
+#### QQ
+##### 官方机器人
+<div align="left">
+  <img width="200" src="./assets/qqbot_qr_guild.png" alt="guild qr">
+  <img width="200" src="./assets/qqbot_qr_group.png" alt="group qr">
+</div>
+
+##### 第三方协议
+由于腾讯风控问题，请[在此提交](https://github.com/Teahouse-Studios/akari-bot/issues/new?assignees=OasisAkari&labels=New&template=add_new_group.yaml&title=%5BNEW%5D%3A+)入群申请。
+
+你也可以加入我们的 QQ 公共实例测试群：[738829671](https://qm.qq.com/q/Rmuo5ORYgq)
+
+#### Discord
+
+邀请链接：<https://discord.com/oauth2/authorize?client_id=879379218209861712&scope=bot&permissions=71605695277126>
+
+#### Telegram
+
+邀请链接：<https://t.me/oasisakaribot>
+
+#### KOOK（开黑啦）
+
+邀请链接：<https://www.kookapp.cn/app/oauth2/authorize?id=19512&permissions=949248&client_id=xiDWoVygvPsP6bov&redirect_uri=&scope=bot>
+
+#### Matrix
+
+邀请链接：<https://matrix.to/#/@akaribot:matrix.org>
+>>>>>>> 46ba72bf087c5730d796c00e8f34920880bd39a5
 
 ### 自搭建
 
@@ -50,9 +80,22 @@ _图源 [秋月雪乃杏](https://space.bilibili.com/6851743)_
 若遇到问题，可以通过 [Issue](https://github.com/Teahouse-Studios/akari-bot/issues/new) 或其他方式咨询开发者。
 
 ### 贡献
+如你想为我们做出贡献，可以看看[这里](/CONTRIBUTING.md)。
 
-如你想为我们编写新的模块，可以看看[这里](https://bot.teahouse.team/wiki/%E6%A8%A1%E5%9D%97%E5%BC%80%E5%8F%91%E6%8C%87%E5%8D%97)。
+<<<<<<< HEAD
+=======
+## Star 历史
+[![Star Chart](https://starchart.cc/Teahouse-Studios/akari-bot.svg?variant=adaptive)](https://starchart.cc/Teahouse-Studios/akari-bot)
 
+## 相关项目
+- [`AkariBot I18N`](https://github.com/Teahouse-Studios/akari-bot-i18n)
+- [`AkariBot WebRender`](https://github.com/Teahouse-Studios/akari-bot-webrender)
+- [`AkariBot WebUI`](https://github.com/Teahouse-Studios/akari-bot-webui)
+
+## 鸣谢
+- [`Graia`](https://github.com/GraiaProject/Application) — 小可曾基于此项目开发
+
+>>>>>>> 46ba72bf087c5730d796c00e8f34920880bd39a5
 ## 许可
 
 睦子米使用 AGPL-3.0 协议授权。详见 [./LICENSE](./LICENSE)。

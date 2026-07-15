@@ -1,12 +1,12 @@
+from pathlib import Path
+
 import orjson
 
 from core.builtins.bot import Bot
 from core.builtins.message.internal import I18NContext, Plain
 from core.component import module
-from core.constants.path import assets_path
 
-
-data_path = assets_path / "modules" / "threedsdb"
+data_path = Path(__file__).parent / "data"
 
 
 threedsdb = module("3dsdb", desc="{I18N:threedsdb.help.desc}", developers=["OasisAkari"])
@@ -36,6 +36,8 @@ async def _(msg: Bot.MessageSession, keywords: str):
                         message_str.append("\n")
                         i += 1
     if message_str:
-        await msg.finish([Plain("\n".join(message_str)), (I18NContext("threedsdb.message.limited_results") if i >= 10 else None)])
+        await msg.finish(
+            [Plain("\n".join(message_str)), (I18NContext("threedsdb.message.limited_results") if i >= 10 else None)]
+        )
     else:
         await msg.finish(I18NContext("threedsdb.message.no_results"))

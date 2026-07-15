@@ -10,11 +10,10 @@ from core.utils.image_table import ImageTable, image_table_render
 
 def parse_markdown(md: str) -> list[dict[str, str]]:
     code_block_pattern = r"```(\w*)\n([\s\S]*?)\n```"  # 代码块
-    block_latex_pattern = r"\$\$([\s\S]*?)\$\$"  # 块级 LaTeX
-    inline_latex_pattern = r"(?<!\$)`?\$([^\n\$]+?)\$`?(?!\$)"  # 行内 LaTeX
+    latex_pattern = r"\$\$([\s\S]*?)\$\$"  # 块级 LaTeX
     table_pattern = r"(?:\|.*\|\n)+\|(?:[-:| ]+)\|\n(?:\|.*\|\n)+"  # Markdown 表格
     # 先分块
-    text_split_pattern = r"(```[\s\S]*?```|\$\$[\s\S]*?\$\$|\$[^\n\$]+?\$|(?:\|.*\|\n)+\|(?:[-:| ]+)\|\n(?:\|.*\|\n)+)"
+    text_split_pattern = r"(```[\s\S]*?```|\$\$[\s\S]*?\$\$|(?:\|.*\|\n)+\|(?:[-:| ]+)\|\n(?:\|.*\|\n)+)"
 
     blocks = []
     last_end = 0
@@ -38,12 +37,7 @@ def parse_markdown(md: str) -> list[dict[str, str]]:
                     blocks.append({"type": "text", "content": f"```\n{code}\n```"})
 
         elif content.startswith("$$"):
-            latex_match = re.match(block_latex_pattern, content)
-            if latex_match:
-                blocks.append({"type": "latex", "content": latex_match.group(1).strip()})
-
-        elif content.startswith("$"):
-            latex_match = re.match(inline_latex_pattern, content)
+            latex_match = re.match(latex_pattern, content)
             if latex_match:
                 blocks.append({"type": "latex", "content": latex_match.group(1).strip()})
 
@@ -56,6 +50,10 @@ def parse_markdown(md: str) -> list[dict[str, str]]:
         blocks.append({"type": "text", "content": md[last_end:]})
 
     return blocks
+
+
+def process_redacted(text: str) -> str:
+    return re.sub(r"\{I18N:check\.redacted,reason=(.*?)\}", r"[REDACTED:\1]", text)
 
 
 def generate_latex(formula: str):
@@ -85,14 +83,14 @@ async def generate_code_snippet(code: str, language: str):
         url="https://carbonara.solopov.dev/api/cook",
         data=orjson.dumps(
             {
-                "code": code,
+                "code": process_redacted(code),
                 "backgroundColor": "rgba(255, 255, 255, 0)",
                 "language": language,
                 "theme": "night-owl",
             }
         ),
         headers={"content-type": "application/json"},
-        fmt="content"
+        fmt="content",
     )
 
 
@@ -101,11 +99,11 @@ async def generate_md_table(table: str):
     if len(lines) < 2:
         raise ValueError("Invalid Markdown table format.")
 
-    headers = [h.strip() for h in lines[0].split("|") if h.strip()]
-    data = []
+    headers = [process_redacted(h.strip()) for h in lines[0].split("|") if h.strip()]
 
+    data = []
     for line in lines[2:]:
-        row = [cell.strip() for cell in line.split("|") if cell.strip()]
+        row = [process_redacted(cell.strip()) for cell in line.split("|") if cell.strip()]
         if row:
             data.append(row)
 
@@ -114,9 +112,8 @@ async def generate_md_table(table: str):
 
     image_table = ImageTable(data=data, headers=headers)
     imgs = await image_table_render(image_table)
+
     if imgs:
-        img_lst = []
-        for img in imgs:
-            img_lst.append(img)
-        return img_lst
+        return list(imgs)
+
     raise RuntimeError("Generation failed.")

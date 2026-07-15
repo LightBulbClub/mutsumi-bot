@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import emoji
 import orjson
 
@@ -5,12 +7,11 @@ from core.builtins.bot import Bot
 from core.builtins.message.chain import MessageChain
 from core.builtins.message.internal import Image, I18NContext, Plain
 from core.component import module
-from core.constants.path import assets_path
 from core.logger import Logger
-from core.utils.random import Random
 from core.utils.func import chunk_list
+from core.utils.random import Random
 
-data_path = assets_path / "modules" / "emojimix" / "emoji_data.json"
+data_path = Path(__file__).parent / "assets" / "emoji_data.json"
 API = "https://www.gstatic.com/android/keyboard/emojikitchen"
 
 
@@ -147,7 +148,8 @@ async def _(msg: Bot.MessageSession, emoji1: str, emoji2: str = None):
         unsupported_emojis = mixer.check_supported(combo)
         if unsupported_emojis:
             await msg.finish(
-                I18NContext("emojimix.message.unsupported", emoji="{I18N:message.delimiter}".join(unsupported_emojis)))
+                I18NContext("emojimix.message.unsupported", emoji="{I18N:message.delimiter}".join(unsupported_emojis))
+            )
     else:
         emoji_code1 = "-".join(f"{ord(char):x}" for char in emoji1)
         if emoji_code1 not in mixer.known_supported_emoji:
@@ -169,8 +171,9 @@ async def _(msg: Bot.MessageSession, emoji: str = None):
         if supported_emojis:
             send_msgs = MessageChain.assign(I18NContext("emojimix.message.combine_supported", emoji=emoji))
             if msg.session_info.client_name == "Discord":
-                send_msgs += MessageChain.assign([Plain("".join(supported_emojis[i:i + 200]))
-                                                  for i in range(0, len(supported_emojis), 200)])
+                send_msgs += MessageChain.assign(
+                    [Plain("".join(supported_emojis[i : i + 200])) for i in range(0, len(supported_emojis), 200)]
+                )
             else:
                 send_msgs.append(Plain("".join(supported_emojis)))
             await msg.finish(send_msgs)
@@ -180,10 +183,7 @@ async def _(msg: Bot.MessageSession, emoji: str = None):
         send_msgs = MessageChain.assign(I18NContext("emojimix.message.all_supported"))
         if supported_emojis:
             if msg.session_info.client_name == "Discord":
-                send_msgs += MessageChain.assign([
-                    Plain("".join(chunk))
-                    for chunk in chunk_list(supported_emojis, 200)
-                ])
+                send_msgs += MessageChain.assign([Plain("".join(chunk)) for chunk in chunk_list(supported_emojis, 200)])
             else:
                 send_msgs.append(Plain("".join(supported_emojis)))
         await msg.finish(send_msgs)

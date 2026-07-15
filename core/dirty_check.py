@@ -37,64 +37,93 @@ def hash_hmac(key, code):
 def parse_data(original_content: str, result: dict, confidence: float = 60, additional_text=None) -> dict:
     content = original_content
 
+    replace_tasks = []
+    block_all_due_to_empty_context = False
+    global_reason_label = None
+
     if use_textscan_v1:
-        for itemResult in result["results"]:
-            if float(itemResult["rate"]) >= confidence and itemResult["suggestion"] == "block":
-                for itemDetail in itemResult["details"]:
-                    if "contexts" in itemDetail:
-                        for itemContext in itemDetail["contexts"]:
-                            _offset = 0
-                            if "positions" in itemContext:
-                                for pos in itemContext["positions"]:
-                                    filter_words_length = pos["endPos"] - pos["startPos"]
-                                    reason = str(I18NContext("check.redacted", reason=itemDetail["label"]))
-                                    content = (content[: pos["startPos"] + _offset] +
-                                               reason + content[pos["endPos"] + _offset:])
-                                    _offset += len(reason) - filter_words_length
-                            else:
-                                content = str(I18NContext("check.redacted", reason=itemDetail["label"]))
-                    else:
-                        content = str(I18NContext("check.redacted", reason=itemDetail["label"]))
+        for itemResult in result.get("results", []):
+            if float(itemResult.get("rate", 0)) < confidence:
+                continue
+
+            for itemDetail in itemResult.get("details", []):
+                label = itemDetail.get("label")
+                contexts = itemDetail.get("contexts", [])
+
+                if not contexts:
+                    block_all_due_to_empty_context = True
+                    global_reason_label = label
+                    break
+
+                for itemContext in contexts:
+                    keyword = itemContext.get("context")
+                    if keyword:
+                        replace_tasks.append((str(keyword).strip(), label))
+            if block_all_due_to_empty_context:
+                break
     else:
-        if result["RiskLevel"] == "high":
-            for itemDetail in result["Result"]:
-                if float(itemDetail["Confidence"]) >= confidence:
+        if result.get("RiskLevel") == "high":
+            for itemDetail in result.get("Result", []):
+                if float(itemDetail.get("Confidence", 0)) >= confidence:
                     risk_words = itemDetail.get("RiskWords")
+                    label = itemDetail.get("Label")
+
                     if risk_words:
-                        risk_words = sorted(risk_words.split(","), key=len, reverse=True)
-                        i18ncode_pattern = re.compile(r"\{I18N:[^}]*\}")
-                        placeholders = [(m.start(), m.end()) for m in i18ncode_pattern.finditer(content)]
-
-                        def is_in_placeholder(start, end):
-                            return any(start < p_end and end > p_start for p_start, p_end in placeholders)
-
-                        for word in risk_words:
-                            word = word.strip()
-                            for match in re.finditer(re.escape(word), content):
-                                start, end = match.start(), match.end()
-                                if not is_in_placeholder(start, end):
-                                    reason = str(I18NContext("check.redacted", reason=itemDetail["Label"]))
-                                    content = content[:start] + reason + content[end:]
-                                    shift = len(reason) - len(word)
-                                    placeholders = [
-                                        (s + shift if s > start else s, e + shift if e > start else e) for s, e in placeholders]
+                        for word in risk_words.split(","):
+                            if word:
+                                replace_tasks.append((str(word).strip(), label))
                     else:
-                        content = str(I18NContext("check.redacted", reason=itemDetail["Label"]))
+                        block_all_due_to_empty_context = True
+                        global_reason_label = label
+                        break
+
+    if block_all_due_to_empty_context:
+        content = str(I18NContext("check.redacted", reason=global_reason_label))
+    elif replace_tasks:
+        replace_tasks = sorted(replace_tasks, key=lambda x: len(x[0]), reverse=True)
+
+        i18ncode_pattern = re.compile(r"\{I18N:[^}]*\}")
+        placeholders = [(m.start(), m.end()) for m in i18ncode_pattern.finditer(content)]
+
+        def is_in_placeholder(start, end):
+            return any(start < p_end and end > p_start for p_start, p_end in placeholders)
+
+        matches_to_replace = []
+        replaced_intervals = []
+
+        for word, label in replace_tasks:
+            reason = str(I18NContext("check.redacted", reason=label))
+            for match in re.finditer(re.escape(word), content):
+                start, end = match.start(), match.end()
+
+                # 检查是否在占位符内，或者是否与已知高优先级长词的替换区间重叠
+                if is_in_placeholder(start, end):
+                    continue
+                if any(start < re_end and end > re_start for re_start, re_end in replaced_intervals):
+                    continue
+
+                matches_to_replace.append((start, end, reason))
+                replaced_intervals.append((start, end))
+
+        matches_to_replace = sorted(matches_to_replace, key=lambda x: x[0], reverse=True)
+
+        for start, end, reason in matches_to_replace:
+            content = content[:start] + reason + content[end:]
 
     if additional_text:
         content += "\n" + additional_text + "\n"
+
     return {"content": content, "status": content == original_content, "original": original_content}
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
-async def check(text: str |
-                list[str] |
-                list[MessageElement] |
-                MessageElement |
-                MessageChain,
-                session: MessageSession | None = None,
-                confidence: float = 60,
-                additional_text: str | None = None) -> list[dict]:
+async def check(
+    text: str | list[str] | list[MessageElement] | MessageElement | MessageChain,
+    session: MessageSession | None = None,
+    confidence: float = 60,
+    additional_text: str | None = None,
+    force=False,
+) -> list[dict]:
     """检查字符串。
 
     :param text: 字符串（List/Union）。
@@ -110,8 +139,11 @@ async def check(text: str |
     if isinstance(text, (list, MessageChain)):
         text = [str(x) for x in text]
 
-    if not access_key_id or not access_key_secret or not (session and session.session_info.require_check_dirty_words):
+    if not access_key_id or not access_key_secret:
         Logger.warning("Dirty words filter was disabled, skip.")
+        return [{"content": t, "status": True, "original": t} for t in text]
+    if not force and (session and not session.session_info.require_check_dirty_words):
+        Logger.warning("Dirty words filter was disabled by session, skip.")
         return [{"content": t, "status": True, "original": t} for t in text]
 
     if not text:
@@ -124,10 +156,13 @@ async def check(text: str |
     for q in query_list:
         for pq in query_list[q]:
             if not query_list[q][pq]:
-                cache = await DirtyWordCache.check(pq)
-                if cache:
-                    query_list[q][pq] = parse_data(pq, cache.result, confidence, additional_text)
-
+                try:
+                    cache = await DirtyWordCache.check(pq)
+                    if cache:
+                        query_list[q][pq] = parse_data(pq, cache.result, confidence, additional_text)
+                except Exception:
+                    Logger.warning("Failed to get cache, skip.")
+                    Logger.exception()
     call_api_list = {}
     for q in query_list:
         for pq in query_list[q]:
@@ -147,9 +182,9 @@ async def check(text: str |
                 "tasks": [{"dataId": str(uuid.uuid4()), "content": x} for x in call_api_list_],
             }
             date = time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime())
-            content_md5 = base64.b64encode(
-                hashlib.md5(orjson.dumps(body), usedforsecurity=False).digest()
-            ).decode("utf-8")
+            content_md5 = base64.b64encode(hashlib.md5(orjson.dumps(body), usedforsecurity=False).digest()).decode(
+                "utf-8"
+            )
             headers = {
                 "Accept": "application/json",
                 "Content-Type": "application/json",
@@ -178,7 +213,8 @@ async def check(text: str |
                             content = item["content"]
                             for n in call_api_list[content]:
                                 query_list[n][content] = parse_data(content, item, confidence, additional_text)
-                            await DirtyWordCache.create(desc=content, result=item)
+                            hash_id = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                            await DirtyWordCache.create(hash_id=hash_id, desc=content, result=item)
                     else:
                         raise ValueError(result["msg"])
                 else:
@@ -187,7 +223,9 @@ async def check(text: str |
             root = "https://green-cip.cn-shanghai.aliyuncs.com"
             sem = asyncio.Semaphore(10)
 
-            async def call_api(x: str):
+            split_results = {x: [] for x in call_api_list_}
+
+            async def call_api(original_text: str, sub_text: str, index: int):
                 async with sem:
                     date = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                     params = {
@@ -200,44 +238,65 @@ async def check(text: str |
                         "SignatureNonce": str(uuid.uuid4()),
                         "Action": "TextModerationPlus",
                         "Service": "comment_detection_pro",
-                        "ServiceParameters": orjson.dumps(
-                            {"dataId": str(uuid.uuid4()), "content": x}
-                        ).decode("utf-8")
+                        "ServiceParameters": orjson.dumps({"dataId": str(uuid.uuid4()), "content": sub_text}).decode(
+                            "utf-8"
+                        ),
                     }
 
                     sorted_params = sorted(params.items(), key=lambda k: k[0])
                     step1 = "&".join(
-                        f"{urllib.parse.quote(str(k), safe='-_.~')}="
-                        f"{urllib.parse.quote(str(v), safe='-_.~')}"
+                        f"{urllib.parse.quote(str(k), safe='-_.~')}={urllib.parse.quote(str(v), safe='-_.~')}"
                         for k, v in sorted_params
                     )
-                    step2 = "POST&%2F&" + urllib.parse.quote(step1, safe='-_.~')
+                    step2 = "POST&%2F&" + urllib.parse.quote(step1, safe="-_.~")
                     step3 = f"{access_key_secret}&"
                     signature = base64.b64encode(
                         hmac.new(step3.encode("utf-8"), step2.encode("utf-8"), hashlib.sha1).digest()
                     ).decode("utf-8")
                     params["Signature"] = signature
 
-                    query_string = "&".join(
-                        f"{k}={urllib.parse.quote(str(v), safe='-_.~')}" for k, v in params.items()
-                    )
+                    query_string = "&".join(f"{k}={urllib.parse.quote(str(v), safe='-_.~')}" for k, v in params.items())
 
                     resp = await client.post(f"{root}/?{query_string}")
                     if resp.status_code == 200:
                         result = resp.json()
                         Logger.debug(result)
                         if result["Code"] == 200:
-                            for n in call_api_list[x]:
-                                query_list[n][x] = parse_data(x, result["Data"], confidence, additional_text)
-                            await DirtyWordCache.create(desc=x, result=result["Data"])
+                            parsed_sub = parse_data(sub_text, result["Data"], confidence, additional_text)
+                            split_results[original_text].append((index, parsed_sub, result["Data"]))
                         else:
                             raise ValueError(result["Message"])
                     else:
                         raise ValueError(resp.text)
 
             async with httpx.AsyncClient() as client:
-                await asyncio.gather(*(call_api(x) for x in call_api_list_))
+                tasks = []
+                for x in call_api_list_:
+                    chunks = [x[i : i + 600] for i in range(0, len(x), 600)]
+                    for idx, chunk in enumerate(chunks):
+                        tasks.append(call_api(x, chunk, idx))
 
+                await asyncio.gather(*tasks)
+
+            for x, res_list in split_results.items():
+                res_list.sort(key=lambda item: item[0])
+
+                merged_content = "".join([r[1]["content"] for r in res_list])
+                merged_status = all(r[1]["status"] for r in res_list)
+
+                final_parse_result = {"content": merged_content, "status": merged_status, "original": x}
+
+                for n in call_api_list[x]:
+                    query_list[n][x] = final_parse_result
+
+                if res_list:
+                    try:
+                        hash_id = hashlib.sha256(x.encode("utf-8")).hexdigest()
+                        last_api_data = res_list[-1][2]
+                        await DirtyWordCache.create(hash_id=hash_id, desc=x, result=last_api_data)
+                    except Exception:
+                        Logger.warning("Failed to create dirty word cache, skip.")
+                        Logger.exception()
     results = []
     Logger.debug(query_list)
     for q in query_list.values():
@@ -246,13 +305,11 @@ async def check(text: str |
     return results
 
 
-async def check_bool(text: str |
-                     list[str] |
-                     list[MessageElement] |
-                     MessageElement |
-                     MessageChain,
-                     session: MessageSession | None = None,
-                     confidence: float = 60) -> bool:
+async def check_bool(
+    text: str | list[str] | list[MessageElement] | MessageElement | MessageChain,
+    session: MessageSession | None = None,
+    confidence: float = 60,
+) -> bool:
     """检查字符串是否合规。
 
     :param text: 字符串（List/Union）。

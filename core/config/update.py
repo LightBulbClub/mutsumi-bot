@@ -1,3 +1,4 @@
+import re
 import shutil
 from time import sleep
 
@@ -18,6 +19,7 @@ old_cfg_file_path = config_path / "config.cfg"
 
 def convert_cfg_to_toml():
     import configparser
+
     config_old = configparser.ConfigParser()
     config_old.read(old_cfg_file_path)
     config_dict = {}
@@ -65,21 +67,9 @@ class ConfigReorganizer:
     def _init_file(self, cfg_name):
         if cfg_name not in self.configs:
             self.configs[cfg_name] = toml_document()
-            self.configs[cfg_name].add(
-                toml_comment(
-                    self.locale.t(
-                        "config.header.line.1",
-                        fallback_failed_prompt=False)))
-            self.configs[cfg_name].add(
-                toml_comment(
-                    self.locale.t(
-                        "config.header.line.2",
-                        fallback_failed_prompt=False)))
-            self.configs[cfg_name].add(
-                toml_comment(
-                    self.locale.t(
-                        "config.header.line.3",
-                        fallback_failed_prompt=False)))
+            self.configs[cfg_name].add(toml_comment(self.locale.t("config.header.line.1", locale_failed_prompt=False)))
+            self.configs[cfg_name].add(toml_comment(self.locale.t("config.header.line.2", locale_failed_prompt=False)))
+            self.configs[cfg_name].add(toml_comment(self.locale.t("config.header.line.3", locale_failed_prompt=False)))
 
     def reorganize_key(self, key, secret=False):
         cfg_name = self.prefix + self.table
@@ -96,18 +86,18 @@ class ConfigReorganizer:
             self.configs[cfg_name].add(table, toml_document())
             if self.prefix:
                 if table.endswith("_secret"):
-                    qk = f"config.table.secret_{self.prefix.rstrip("_")}"
+                    qk = f"config.table.secret_{self.prefix.rstrip('_')}"
                 else:
-                    qk = f"config.table.config_{self.prefix.rstrip("_")}"
-                self.configs[cfg_name][table].add(toml_comment(self.locale.t(qk, fallback_failed_prompt=False)))
+                    qk = f"config.table.config_{self.prefix.rstrip('_')}"
+                self.configs[cfg_name][table].add(toml_comment(self.locale.t(qk, locale_failed_prompt=False)))
 
         try:
             self.configs[cfg_name][table].add(key, self.config[c_target][key])
         except KeyAlreadyPresent:
             self.configs[cfg_name][table][key] = self.config[c_target][key]
 
-        qc = f"config.comments.{key}"
-        localed_comment = self.locale.t(qc, fallback_failed_prompt=False)
+        qc = f"config.comments.{table}.{key}"
+        localed_comment = self.locale.t(qc, locale_failed_prompt=False)
         if localed_comment != qc:
             self.configs[cfg_name][table].value.item(key).comment(localed_comment)
 
@@ -120,17 +110,15 @@ class ConfigReorganizer:
             self.configs[cfg_name].add(nl())
             self.configs[cfg_name].add(cfg_name, toml_document())
             self.configs[cfg_name][cfg_name].add(
-                toml_comment(
-                    self.locale.t("config.table.config_bot", fallback_failed_prompt=False)
-                )
+                toml_comment(self.locale.t("config.table.config_bot", locale_failed_prompt=False))
             )
         try:
             self.configs[cfg_name][cfg_name].add("enable", True)
         except KeyAlreadyPresent:
             self.configs[cfg_name][cfg_name]["enable"] = True
 
-        qc = "config.comments.enable"
-        localed_comment = self.locale.t(qc, fallback_failed_prompt=False)
+        qc = "config.comments.bot.enable"
+        localed_comment = self.locale.t(qc, locale_failed_prompt=False)
         if localed_comment != qc:
             self.configs[cfg_name][cfg_name].value.item("enable").comment(localed_comment)
 
@@ -156,20 +144,20 @@ if "config_version" not in config:
     else:
         get_old_locale = "zh_cn"
     old_locale = Locale(get_old_locale)
-    configs["config"].add(toml_comment(old_locale.t("config.header.line.1", fallback_failed_prompt=False)))
-    configs["config"].add(toml_comment(old_locale.t("config.header.line.2", fallback_failed_prompt=False)))
-    configs["config"].add(toml_comment(old_locale.t("config.header.line.3", fallback_failed_prompt=False)))
+    configs["config"].add(toml_comment(old_locale.t("config.header.line.1", locale_failed_prompt=False)))
+    configs["config"].add(toml_comment(old_locale.t("config.header.line.2", locale_failed_prompt=False)))
+    configs["config"].add(toml_comment(old_locale.t("config.header.line.3", locale_failed_prompt=False)))
     configs["config"].add(nl())
 
     configs["config"].add("default_locale", get_old_locale)
-    configs["config"].item("default_locale").comment(old_locale.t(
-        "config.comments.default_locale",
-        fallback_failed_prompt=False))
+    configs["config"].item("default_locale").comment(
+        old_locale.t("config.comments.default_locale", locale_failed_prompt=False)
+    )
 
     configs["config"].add("config_version", 0)
-    configs["config"].item("config_version").comment(old_locale.t(
-        "config.comments.default_locale",
-        fallback_failed_prompt=False))
+    configs["config"].item("config_version").comment(
+        old_locale.t("config.comments.default_locale", locale_failed_prompt=False)
+    )
     configs["config"].add(nl())
 
     # reorganize some keys
@@ -213,7 +201,6 @@ if "config_version" not in config:
     reorganizer.add_enable_flag()
     reorganizer.reorganize_key("qq_bot_appid")
     reorganizer.reorganize_key("qq_private_bot")
-    reorganizer.reorganize_key("qq_bot_enable_send_url")
     reorganizer.reorganize_key("qq_typing_emoji")
     reorganizer.reorganize_key("qq_bot_secret", True)
 
@@ -233,8 +220,8 @@ if "config_version" not in config:
     if "cfg" in config:
         for k, v in config["cfg"].items():
             configs["config"]["config"][k] = v
-            qc = "config.comments." + k
-            localed_comment = old_locale.t(qc, fallback_failed_prompt=False)
+            qc = f"config.comments.config.{k}"
+            localed_comment = old_locale.t(qc, locale_failed_prompt=False)
             if localed_comment != qc:
                 configs["config"]["config"].value.item(k).comment(localed_comment)
     configs["config"].add(nl())
@@ -244,8 +231,8 @@ if "config_version" not in config:
     if "secret" in config:
         for k, v in config["secret"].items():
             configs["config"]["secret"][k] = v
-            qc = "config.comments." + k
-            localed_comment = old_locale.t(qc, fallback_failed_prompt=False)
+            qc = f"config.comments.secret.{k}"
+            localed_comment = old_locale.t(qc, locale_failed_prompt=False)
             if localed_comment != qc:
                 configs["config"]["secret"].value.item(k).comment(localed_comment)
 
@@ -265,7 +252,7 @@ if "config_version" not in config:
     with open(cfg_file_path, "r", encoding="utf-8") as cfg_file:
         config = toml_parser(cfg_file.read())  # Reload the config file after regeneration
 if config["config_version"] < config_version:
-    logger.info(f"Updating Config file from {config["config_version"]} to {config_version}...")
+    logger.info(f"Updating Config file from {config['config_version']} to {config_version}...")
     if config["config_version"] < 1:
         with open(cfg_file_path, "r", encoding="utf-8") as f:
             config = toml_parser(f.read())
@@ -356,6 +343,39 @@ if config["config_version"] < config_version:
             f.write(toml_dumps(config))
         with open(cfg_file_path, "r", encoding="utf-8") as cfg_file:
             config = toml_parser(cfg_file.read())  # Reload the config file after regeneration
+
+    if config["config_version"] < 3:
+        bot_renames = {"bot_aiocqhttp": "bot_onebot", "bot_aiogram": "bot_telegram"}
+
+        for old_name, new_name in bot_renames.items():
+            old_file = config_path / f"{old_name}.toml"
+            new_file = config_path / f"{new_name}.toml"
+
+            if old_file.exists():
+                with open(old_file, "r", encoding="utf-8") as f:
+                    bot_cfg = toml_parser(f.read())
+
+                if old_name in bot_cfg:
+                    bot_cfg[new_name] = bot_cfg.pop(old_name)
+
+                if f"{old_name}_secret" in bot_cfg:
+                    bot_cfg[f"{new_name}_secret"] = bot_cfg.pop(f"{old_name}_secret")
+
+                if new_name == "bot_onebot" and new_name in bot_cfg:
+                    target_table = bot_cfg[new_name]
+                    if "qq_disable_temp_session" in target_table:
+                        old_val = target_table.pop("qq_disable_temp_session")
+                        target_table["qq_enable_temp_session"] = not old_val
+
+                content = toml_dumps(bot_cfg)
+                content = re.sub(r"(#.*?\n)\n+", r"\1\n", content)
+                with open(new_file, "w", encoding="utf-8") as f:
+                    f.write(content)
+                old_file.unlink()
+
+        config["config_version"] = 3
+        with open(cfg_file_path, "w", encoding="utf-8") as f:
+            f.write(toml_dumps(config))
 
     logger.success("Config file updated successfully.")
     sleep(3)

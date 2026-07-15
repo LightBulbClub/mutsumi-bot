@@ -1,10 +1,10 @@
 {
-    "arcaea.help.calc": "根据分数与歌曲定数计算对应的单曲潜力值。",
-    "arcaea.help.desc": "查询 Arcaea 相关内容。",
-    "arcaea.help.download": "获取最新版本的游戏 APK。",
-    "arcaea.help.random": "随机一首歌曲。",
-    "arcaea.help.rank.free": "查看当前免费包游玩排行。",
-    "arcaea.help.rank.paid": "查看当前付费包游玩排行。",
-    "arcaea.message.download": "当前最新版本：${version}\n下载地址：${url}",
-    "arcaea.message.get_failed": "获取失败。"
+    "arcaea.help.calc": "スコアと譜面定数を基に、対応する譜面別ポテンシャルを算出します。",
+    "arcaea.help.desc": "Arcaea に関する情報を検索しています。",
+    "arcaea.help.download": "ゲームの最新版（中国版）APK を入手します。",
+    "arcaea.help.random": "曲をランダムに選択します。",
+    "arcaea.help.rank.free": "現在無料の楽曲の人気ランキングを表示します。",
+    "arcaea.help.rank.paid": "現在有料の楽曲の人気ランキングを表示します。",
+    "arcaea.message.download": "現在の最新バージョン：${version}\nダウンロード：${url}",
+    "arcaea.message.get_failed": "取得に失敗しました。"
 }

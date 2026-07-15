@@ -1,6 +1,7 @@
 import orjson
 
 from core.builtins.message.internal import I18NContext, Plain
+from core.constants.exceptions import ExternalException
 from core.logger import Logger
 from core.utils.http import post_url, get_url
 from core.utils.image import cb64imglst
@@ -40,17 +41,18 @@ async def bugtracker_get(msg, mojira_id: str):
             201,
             headers={"Content-Type": "application/json"},
         )
-        load_json = orjson.loads(get_json).get("issues")[0]
+        issues = orjson.loads(get_json).get("issues", [])
+        load_json = issues[0] if issues else None
     except IndexError:
         return I18NContext("bugtracker.message.get_failed"), None
-    except ValueError as e:
+    except ExternalException as e:
         if str(e).startswith("500"):
             return I18NContext("bugtracker.message.error.server"), None
         raise e
+    except Exception as e:
+        raise e
     if mojira_id not in spx_cache:
-        get_spx = await get_url(
-            "https://spxx-db.teahouse.team/crowdin/zh-CN/zh_CN.json", 200
-        )
+        get_spx = await get_url("https://spxx-db.teahouse.team/crowdin/zh-CN/zh_CN.json", 200)
         if get_spx:
             spx_cache.update(orjson.loads(get_spx))
     if id_ in spx_cache and msg.session_info.locale.locale == "zh_cn":
@@ -62,18 +64,14 @@ async def bugtracker_get(msg, mojira_id: str):
                 errmsg += "\n" + msgs
         else:
             if "key" in load_json:
-                data["title"] = f"[{load_json["key"]}] "
+                data["title"] = f"[{load_json['key']}] "
             if "fields" in load_json:
                 fields = load_json["fields"]
                 if "summary" in fields:
                     data["title"] = (
                         data["title"]
                         + fields["summary"]
-                        + (
-                            f" (spx: {data["translation"]})"
-                            if data.get("translation", False)
-                            else ""
-                        )
+                        + (f" (spx: {data['translation']})" if data.get("translation", False) else "")
                     )
                 if "issuetype" in fields:
                     data["type"] = fields["issuetype"]["name"]
@@ -82,11 +80,7 @@ async def bugtracker_get(msg, mojira_id: str):
                 if "project" in fields:
                     data["project"] = fields["project"]["name"]
                 if "resolution" in fields:
-                    data["resolution"] = (
-                        fields["resolution"]["name"]
-                        if fields["resolution"]
-                        else "Unresolved"
-                    )
+                    data["resolution"] = fields["resolution"]["name"] if fields["resolution"] else "Unresolved"
                 if "versions" in load_json["fields"]:
                     versions = fields["versions"]
                     verlist = []
@@ -95,15 +89,11 @@ async def bugtracker_get(msg, mojira_id: str):
                     if verlist[0] == verlist[-1]:
                         data["version"] = "Version: " + verlist[0]
                     else:
-                        data["version"] = (
-                            "Versions: " + verlist[0] + " ~ " + verlist[-1]
-                        )
-                data["link"] = f"https://bugs.mojang.com/browse/{id_.split("-", 1)[0]}/issues/" + id_
+                        data["version"] = "Versions: " + verlist[0] + " ~ " + verlist[-1]
+                data["link"] = f"https://bugs.mojang.com/browse/{id_.split('-', 1)[0]}/issues/" + id_
                 if "customfield_12200" in fields:
                     if fields["customfield_12200"]:
-                        data["priority"] = (
-                            "Mojang Priority: " + fields["customfield_12200"]["value"]
-                        )
+                        data["priority"] = "Mojang Priority: " + fields["customfield_12200"]["value"]
                 if "priority" in fields:
                     if fields["priority"]:
                         data["priority"] = "Priority: " + fields["priority"]["name"]

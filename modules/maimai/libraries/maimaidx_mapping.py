@@ -1,5 +1,6 @@
+from pathlib import Path
+
 from core.config import Config
-from core.constants.path import assets_path
 
 DF_DEVELOPER_TOKEN = Config("diving_fish_developer_token", cfg_type=str, secret=True, table_name="module_maimai")
 LX_DEVELOPER_TOKEN = Config("lxns_developer_token", cfg_type=str, secret=True, table_name="module_maimai")
@@ -8,7 +9,7 @@ SONGS_NEED_IMG = 10
 
 default_source = "lxns" if LX_DEVELOPER_TOKEN else "diving-fish"
 
-mai_assets_path = assets_path / "modules" / "maimai"
+mai_assets_path = Path(__file__).parent.parent / "assets"
 mai_cover_path = mai_assets_path / "static" / "mai" / "cover"
 mai_alias_path = mai_assets_path / "mai_song_alias.json"
 mai_grade_info_path = mai_assets_path / "mai_grade_info.json"
@@ -184,8 +185,10 @@ genre_i18n_mapping = {
     "舞萌": "maimai",
     "音击&中二节奏": "ONGEKI & CHUNITHM",
     "オンゲキCHUNITHM": "ONGEKI & CHUNITHM",
-    "宴会场": "宴會場"
+    "宴会场": "宴會場",
 }
+
+version_fixup_mapping = {"MiLK PLUS": "maimai MiLK PLUS"}
 
 mai_plate_remaster_required = [
     "17",
@@ -269,6 +272,7 @@ versions = [
     "maimai でらっくす FESTiVAL",
     "maimai でらっくす BUDDiES",
     "maimai でらっくす PRiSM",
+    "maimai でらっくす PRiSM PLUS",
 ]
 
 sd_plate_mapping = {
@@ -284,7 +288,7 @@ sd_plate_mapping = {
     "菫": "maimai MURASAKi PLUS",
     "白": "maimai MiLK",
     "雪": "MiLK PLUS",
-    "輝": "maimai FiNALE"
+    "輝": "maimai FiNALE",
 }
 
 dx_plate_mapping = {
@@ -299,7 +303,7 @@ dx_plate_mapping = {
     "双": "maimai でらっくす BUDDiES",
     "宴": "maimai でらっくす BUDDiES",
     "鏡": "maimai でらっくす PRiSM",
-    "彩": "maimai でらっくす PRiSM",
+    "彩": "maimai でらっくす PRiSM PLUS",
 }
 
 plate_mapping = sd_plate_mapping | dx_plate_mapping
@@ -314,10 +318,7 @@ plate_version_ts_mapping = {
     "雙": "双",
     "镜": "鏡",
 }
-plate_goal_ts_mapping = {
-    "將": "将",
-    "极": "極"
-}
+plate_goal_ts_mapping = {"將": "将", "极": "極"}
 
 grade_mapping = {
     "初段": "grade1",
@@ -417,7 +418,8 @@ def mai_plate_song_expect(version):
                 "712",
                 "731",
                 "792",
-                "853"]
+                "853",
+            ]
         case "熊" | "華":
             song_expect = ["10146"]
         case "爽" | "煌":

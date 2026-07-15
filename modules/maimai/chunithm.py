@@ -1,13 +1,10 @@
-from core.builtins.bot import Bot
 from core.builtins.message.chain import MessageChain
-from core.builtins.message.internal import Plain, I18NContext, Image as BImage
+from core.builtins.message.internal import Plain, Image as BImage
 from core.component import module
-from core.utils.image import msgchain2image
 from core.utils.func import is_int
-from .database.models import DivingProberBindInfo, LxnsProberBindInfo
+from core.utils.image import msgchain2image
 from .libraries.chunithm_apidata import get_info, get_record_df, get_record_lx, update_cover
 from .libraries.chunithm_best30 import generate as generate_b30
-from .libraries.chunithm_mapping import diff_list, default_source
 from .libraries.chunithm_music import TotalList
 from .libraries.chunithm_utils import *
 
@@ -34,41 +31,37 @@ async def _(msg: Bot.MessageSession, constant: float, constant_max: float = None
     elif constant_max:
         if constant > constant_max:
             data = (await total_list.get()).filter(ds=(constant_max, constant))
-            msg_chain = MessageChain.assign(I18NContext(
-                "maimai.message.base.range",
-                constant=round(constant_max, 1),
-                constant_max=round(constant, 1))
+            msg_chain = MessageChain.assign(
+                I18NContext(
+                    "maimai.message.base.range", constant=round(constant_max, 1), constant_max=round(constant, 1)
+                )
             )
         else:
             data = (await total_list.get()).filter(ds=(constant, constant_max))
-            msg_chain = MessageChain.assign(I18NContext(
-                "maimai.message.base.range",
-                constant=round(constant, 1),
-                constant_max=round(constant_max, 1)
-            ))
+            msg_chain = MessageChain.assign(
+                I18NContext(
+                    "maimai.message.base.range", constant=round(constant, 1), constant_max=round(constant_max, 1)
+                )
+            )
     else:
         data = (await total_list.get()).filter(ds=constant)
         msg_chain = MessageChain.assign(I18NContext("maimai.message.base", constant=round(constant, 1)))
 
-    for music in sorted(data, key=lambda i: int(i["id"])):
+    for music in sorted(data, key=lambda i: int(i.get("id", 0))):
         for i in music.diff:
             result_set.append(
                 (
-                    music["id"],
-                    music["title"],
-                    music["ds"][i],
+                    music.get("id", ""),
+                    music.get("title", ""),
+                    music.get("ds", [])[i] if i < len(music.get("ds", [])) else 0,
                     diff_list[i],
-                    music["level"][i],
+                    music.get("level", [])[i] if i < len(music.get("level", [])) else "",
                 )
             )
 
     total_pages = (len(result_set) + SONGS_PER_PAGE - 1) // SONGS_PER_PAGE
     get_page = msg.parsed_msg.get("-p", False)
-    page = (
-        max(min(int(get_page["<page>"]), total_pages), 1)
-        if get_page and is_int(get_page["<page>"])
-        else 1
-    )
+    page = max(min(int(get_page["<page>"]), total_pages), 1) if get_page and is_int(get_page["<page>"]) else 1
     start_index = (page - 1) * SONGS_PER_PAGE
     end_index = page * SONGS_PER_PAGE
 
@@ -94,24 +87,20 @@ async def _(msg: Bot.MessageSession, constant: float, constant_max: float = None
 async def _(msg: Bot.MessageSession, level: str):
     result_set = []
     data = (await total_list.get()).filter(level=level)
-    for music in sorted(data, key=lambda i: int(i["id"])):
+    for music in sorted(data, key=lambda i: int(i.get("id", 0))):
         for i in music.diff:
             result_set.append(
                 (
-                    music["id"],
-                    music["title"],
-                    music["ds"][i],
+                    music.get("id", ""),
+                    music.get("title", ""),
+                    music.get("ds", [])[i] if i < len(music.get("ds", [])) else 0,
                     diff_list[i],
-                    music["level"][i],
+                    music.get("level", [])[i] if i < len(music.get("level", [])) else "",
                 )
             )
     total_pages = (len(result_set) + SONGS_PER_PAGE - 1) // SONGS_PER_PAGE
     get_page = msg.parsed_msg.get("-p", False)
-    page = (
-        max(min(int(get_page["<page>"]), total_pages), 1)
-        if get_page and is_int(get_page["<page>"])
-        else 1
-    )
+    page = max(min(int(get_page["<page>"]), total_pages), 1) if get_page and is_int(get_page["<page>"]) else 1
     start_index = (page - 1) * SONGS_PER_PAGE
     end_index = page * SONGS_PER_PAGE
 
@@ -140,15 +129,11 @@ async def _(msg: Bot.MessageSession, keyword: str):
     if len(data) == 0:
         await msg.finish(I18NContext("maimai.message.music_not_found"))
 
-    for music in sorted(data, key=lambda i: int(i["id"])):
-        result_set.append((music["id"], music["title"]))
+    for music in sorted(data, key=lambda i: int(i.get("id", 0))):
+        result_set.append((music.get("id", ""), music.get("title", "")))
     total_pages = (len(result_set) + SONGS_PER_PAGE - 1) // SONGS_PER_PAGE
     get_page = msg.parsed_msg.get("-p", False)
-    page = (
-        max(min(int(get_page["<page>"]), total_pages), 1)
-        if get_page and is_int(get_page["<page>"])
-        else 1
-    )
+    page = max(min(int(get_page["<page>"]), total_pages), 1) if get_page and is_int(get_page["<page>"]) else 1
     start_index = (page - 1) * SONGS_PER_PAGE
     end_index = page * SONGS_PER_PAGE
 
@@ -180,39 +165,46 @@ async def _(msg: Bot.MessageSession, song: str):
         await msg.finish(I18NContext("maimai.message.music_not_found"))
 
     msg_chain = MessageChain.assign()
-    if len(music["ds"]) == 1:
-        chart = music["charts"][0]
-        ds = music["ds"][0]
-        level = music["level"][0]
-        msg_chain.append(I18NContext(
-            "chunithm.message.chart",
-            diff="World's End",
-            level=level,
-            ds="☆" * ds,
-            tap=chart["notes"][0],
-            hold=chart["notes"][1],
-            slide=chart["notes"][2],
-            air=chart["notes"][3],
-            flick=chart["notes"][4],
-            charter=chart["charter"],
-        )
+    music_ds = music.get("ds", [])
+    music_charts = music.get("charts", [])
+    music_level = music.get("level", [])
+    if len(music_ds) == 1:
+        chart = music_charts[0] if music_charts else {}
+        notes = chart.get("notes", [0, 0, 0, 0, 0])
+        ds = music_ds[0]
+        level = music_level[0] if music_level else ""
+        msg_chain.append(
+            I18NContext(
+                "chunithm.message.chart",
+                diff="World's End",
+                level=level,
+                ds="☆" * ds,
+                tap=notes[0] if len(notes) > 0 else 0,
+                hold=notes[1] if len(notes) > 1 else 0,
+                slide=notes[2] if len(notes) > 2 else 0,
+                air=notes[3] if len(notes) > 3 else 0,
+                flick=notes[4] if len(notes) > 4 else 0,
+                charter=chart.get("charter", ""),
+            )
         )
     else:
-        for _diff, ds in enumerate(music["ds"]):
-            chart = music["charts"][_diff]
-            level = music["level"][_diff]
-            msg_chain.append(I18NContext(
-                "chunithm.message.chart",
-                diff=diff_list[_diff],
-                level=level,
-                ds=ds,
-                tap=chart["notes"][0],
-                hold=chart["notes"][1],
-                slide=chart["notes"][2],
-                air=chart["notes"][3],
-                flick=chart["notes"][4],
-                charter=chart["charter"],
-            )
+        for _diff, ds in enumerate(music_ds):
+            chart = music_charts[_diff] if _diff < len(music_charts) else {}
+            notes = chart.get("notes", [0, 0, 0, 0, 0])
+            level = music_level[_diff] if _diff < len(music_level) else ""
+            msg_chain.append(
+                I18NContext(
+                    "chunithm.message.chart",
+                    diff=diff_list[_diff],
+                    level=level,
+                    ds=ds,
+                    tap=notes[0] if len(notes) > 0 else 0,
+                    hold=notes[1] if len(notes) > 1 else 0,
+                    slide=notes[2] if len(notes) > 2 else 0,
+                    air=notes[3] if len(notes) > 3 else 0,
+                    flick=notes[4] if len(notes) > 4 else 0,
+                    charter=chart.get("charter", ""),
+                )
             )
     await msg.finish(await get_info(music, msg_chain))
 
@@ -236,23 +228,29 @@ async def _(msg: Bot.MessageSession, song: str):
         await msg.finish(I18NContext("maimai.message.music_not_found"))
 
     msg_chain = MessageChain.assign()
-    if len(music["ds"]) == 6:
-        msg_chain.append(I18NContext(
-            "chunithm.message.song.worlds_end",
-            artist=music["basic_info"]["artist"],
-            genre=music["basic_info"]["genre"],
-            bpm=music["basic_info"]["bpm"],
-            version=music["basic_info"]["from"],
-        ))
+    music_ds = music.get("ds", [])
+    basic_info = music.get("basic_info", {})
+    if len(music_ds) == 6:
+        msg_chain.append(
+            I18NContext(
+                "chunithm.message.song.worlds_end",
+                artist=basic_info.get("artist", ""),
+                genre=basic_info.get("genre", ""),
+                bpm=basic_info.get("bpm", 0),
+                version=basic_info.get("from", ""),
+            )
+        )
     else:
-        msg_chain.append(I18NContext(
-            "chunithm.message.song",
-            artist=music["basic_info"]["artist"],
-            genre=music["basic_info"]["genre"],
-            bpm=music["basic_info"]["bpm"],
-            version=music["basic_info"]["from"],
-            level="/".join((str(ds) for ds in music["ds"])),
-        ))
+        msg_chain.append(
+            I18NContext(
+                "chunithm.message.song",
+                artist=basic_info.get("artist", ""),
+                genre=basic_info.get("genre", ""),
+                bpm=basic_info.get("bpm", 0),
+                version=basic_info.get("from", ""),
+                level="/".join((str(ds) for ds in music_ds)),
+            )
+        )
     await msg.finish(await get_info(music, msg_chain))
 
 
@@ -271,7 +269,7 @@ async def _(msg: Bot.MessageSession):
         if level == "":
             if diff == "":
                 music = (await total_list.get()).random()
-                diffs = MessageChain.assign(Plain(f"{"/".join(str(ds) for ds in music.ds)}"))
+                diffs = MessageChain.assign(Plain(f"{'/'.join(str(ds) for ds in music.ds)}"))
                 await msg.finish(await get_info(music, diffs))
             else:
                 raise ValueError
@@ -279,15 +277,13 @@ async def _(msg: Bot.MessageSession):
             if diff == "":
                 music_data = (await total_list.get()).filter(level=level)
             else:
-                music_data = (await total_list.get()).filter(
-                    level=level, diff=[get_diff(diff)]
-                )
+                music_data = (await total_list.get()).filter(level=level, diff=[get_diff(diff)])
 
         if len(music_data) == 0:
             await msg.finish(I18NContext("maimai.message.music_not_found"))
         else:
             music = music_data.random()
-            diffs = MessageChain.assign(Plain(f"{"/".join(str(ds) for ds in music.ds)}"))
+            diffs = MessageChain.assign(Plain(f"{'/'.join(str(ds) for ds in music.ds)}"))
             await msg.finish(await get_info(music, diffs))
     except (ValueError, TypeError):
         await msg.finish(I18NContext("maimai.message.random.failed"))
@@ -305,7 +301,9 @@ async def _(msg: Bot.MessageSession):
     await DivingProberBindInfo.remove_bind_info(sender_id=msg.session_info.sender_id)
     await msg.finish(I18NContext("maimai.message.unbind.success"))
 
+
 if LX_DEVELOPER_TOKEN:
+
     @chu.command("switch {{I18N:chunithm.help.switch}}")
     async def _(msg: Bot.MessageSession):
         if msg.session_info.sender_info.sender_data.get("chunithum_record_source", default_source) == "lxns":
@@ -346,9 +344,7 @@ async def _(msg: Bot.MessageSession):
     if msg.parsed_msg.get("--no-cover", False):
         actions = await total_list.update()
     else:
-        actions = (
-            await update_cover() and await total_list.update()
-        )
+        actions = await update_cover() and await total_list.update()
     if actions:
         await msg.finish(I18NContext("message.success"))
     else:

@@ -1,17 +1,27 @@
 from datetime import datetime
 
+from core.builtins.session.features import Features
+
 
 class Alive:
     values = {}
 
     @classmethod
-    def refresh_alive(cls, client_name: str, target_prefix_list: list = None, sender_prefix_list: list = None):
-        cls.values[client_name] = {}
-        cls.values[client_name]["ts"] = datetime.now()
-        if target_prefix_list:
-            cls.values[client_name]["target_prefix_list"] = target_prefix_list
-        if sender_prefix_list:
-            cls.values[client_name]["sender_prefix_list"] = sender_prefix_list
+    def refresh_alive(
+        cls,
+        client_name: str,
+        target_prefix_list: list = None,
+        sender_prefix_list: list = None,
+        ctx_slot_index: int = None,
+        features: type[Features] = None,
+    ):
+        cls.values[client_name] = {
+            "target_prefix_list": target_prefix_list,
+            "sender_prefix_list": sender_prefix_list,
+            "ctx_slot_index": ctx_slot_index,
+            "features": features,
+            "ts": datetime.now(),
+        }
 
     @classmethod
     def get_alive(cls):
@@ -61,14 +71,12 @@ class Alive:
         """
         for client_name, data in cls.get_alive().items():
             for prefix in sorted(
-                    data.get(
-                        "target_prefix_list",
-                        []) +
-                    data.get(
-                        "sender_prefix_list",
-                        []),
-                    key=len,
-                    reverse=True):
+                data.get("target_prefix_list", []) + data.get("sender_prefix_list", []), key=len, reverse=True
+            ):
                 if id.startswith(prefix + "|") or id == prefix:
                     return client_name
         return None
+
+    @classmethod
+    def get_infos(cls, client_name: str):
+        return Alive.get_alive().get(client_name, {})

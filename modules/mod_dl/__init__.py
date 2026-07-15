@@ -5,18 +5,22 @@ from core.builtins.bot import Bot
 from core.builtins.message.internal import Plain, I18NContext
 from core.component import module
 from core.config import Config
-from core.utils.http import get_url
 from core.utils.func import is_int
+from core.utils.http import get_url
 
 mod_dl = module(
     module_name="mod_dl",
-    desc="{I18N:mod_dl.help.desc}", doc=True,
+    desc="{I18N:mod_dl.help.desc}",
+    doc=True,
     developers=["HornCopper", "OasisAkari", "z0z0r4"],
     recommend_modules=["mcmod"],
-    alias="moddl")
+    alias="moddl",
+)
 
 x_api_key = Config("curseforge_api_key", cfg_type=str, secret=True, table_name="module_mod_dl")
-enable_mirror = bool(not x_api_key)  # CurseForge API Key 未配置，使用镜像 https://mcim.z0z0r4.top ...(z0z0r4 不想解析网页)
+enable_mirror = bool(
+    not x_api_key
+)  # CurseForge API Key 未配置，使用镜像 https://mcim.z0z0r4.top ...(z0z0r4 不想解析网页)
 
 
 @mod_dl.command("<mod_name> [<version>] {{I18N:mod_dl.help}}")
@@ -31,31 +35,33 @@ async def _(msg: Bot.MessageSession, mod_name: str, version: str = None):
     async def search_modrinth(name: str, ver: str):
         url = f"https://api.modrinth.com/v2/search?query={name}&limit=10"
         if ver:
-            url += f"&facets=[[\"versions:{ver}\"],[\"project_type:mod\"]]"
+            url += f'&facets=[["versions:{ver}"],["project_type:mod"]]'
         else:
-            url += "&facets=[[\"project_type:mod\"]]"
+            url += '&facets=[["project_type:mod"]]'
         resp = await get_url(url, 200, fmt="json", timeout=5, attempt=3)
         if resp:
             results = []
-            if len(resp["hits"]) == 0:
+            hits = resp.get("hits", [])
+            if len(hits) == 0:
                 return None
-            for project in resp["hits"]:
-                results.append(("modrinth", project["title"], project["project_id"], project["versions"]))
+            for project in hits:
+                results.append(
+                    ("modrinth", project.get("title", ""), project.get("project_id", ""), project.get("versions", []))
+                )
             return results
 
     async def search_curseforge(name: str, ver: str):
         if enable_mirror:
             # https://mcim.z0z0r4.top/docs#/Curseforge/curseforge_search_curseforge_search_get
             url = f"https://mcim.z0z0r4.top/curseforge/search?gameId=432&searchFilter={
-                name}&sortField=2&sortOrder=desc&pageSize=10&classId=6"
+                name
+            }&sortField=2&sortOrder=desc&pageSize=10&classId=6"
             headers = None
         else:
-            headers = {
-                "Accept": "application/json",
-                "x-api-key": x_api_key
-            }
+            headers = {"Accept": "application/json", "x-api-key": x_api_key}
             url = f"https://api.curseforge.com/v1/mods/search?gameId=432&searchFilter={
-                name}&sortField=2&sortOrder=desc&pageSize=10&classId=6"
+                name
+            }&sortField=2&sortOrder=desc&pageSize=10&classId=6"
 
         if ver:
             url += f"&gameVersion={ver}"
@@ -63,17 +69,17 @@ async def _(msg: Bot.MessageSession, mod_name: str, version: str = None):
         resp = await get_url(url, 200, fmt="json", timeout=5, attempt=3, headers=headers)
         if resp:
             if not enable_mirror:  # 没提供 pagination
-                if resp["pagination"]["resultCount"] == 0:
+                if resp.get("pagination", {}).get("resultCount", 0) == 0:
                     return None
-            for mod in resp["data"]:
-                results.append(("curseforge", mod["name"], mod["id"], None))
+            for mod in resp.get("data", []):
+                results.append(("curseforge", mod.get("name", ""), mod.get("id", ""), None))
         return results
 
     async def get_modrinth_project_version(project_id: str, ver: str):
-        url = f"https://api.modrinth.com/v2/project/{project_id}/version?game_versions=[\"{ver}\"]&featured=true"
-        resp = (await get_url(url, 200, fmt="json", timeout=5, attempt=3))[0]
-        if resp:
-            return resp
+        url = f'https://api.modrinth.com/v2/project/{project_id}/version?game_versions=["{ver}"]&featured=true'
+        resp_list = await get_url(url, 200, fmt="json", timeout=5, attempt=3)
+        if resp_list:
+            return resp_list[0]
 
     async def get_curseforge_mod_version_index(modid: str):
         if enable_mirror:
@@ -81,29 +87,24 @@ async def _(msg: Bot.MessageSession, mod_name: str, version: str = None):
             url = f"https://mcim.z0z0r4.top/curseforge/mod/{modid}"
             headers = None
         else:
-            headers = {
-                "Accept": "application/json",
-                "x-api-key": x_api_key
-            }
+            headers = {"Accept": "application/json", "x-api-key": x_api_key}
             url = f"https://api.curseforge.com/v1/mods/{modid}"
         resp = await get_url(url, 200, fmt="json", timeout=5, attempt=3, headers=headers)
         if resp:
-            return resp["data"]["latestFilesIndexes"]
+            return resp.get("data", {}).get("latestFilesIndexes", [])
 
     async def get_curseforge_mod_file(modid: str, ver: str):
         if enable_mirror:
             url = f"https://mcim.z0z0r4.top/curseforge/mod/{modid}/files?gameVersion={ver}"
             headers = None
         else:
-            headers = {
-                "Accept": "application/json",
-                "x-api-key": x_api_key
-            }
+            headers = {"Accept": "application/json", "x-api-key": x_api_key}
             url = f"https://api.curseforge.com/v1/mods/{modid}/files?gameVersion={ver}"
 
         resp = await get_url(url, 200, fmt="json", timeout=5, attempt=3, headers=headers)
         if resp:
-            return resp["data"][0]
+            data = resp.get("data", [])
+            return data[0] if data else None
 
     # 搜索 Mod
     result = await asyncio.gather(*(search_modrinth(mod_name, ver), search_curseforge(mod_name, ver)))
@@ -147,18 +148,23 @@ async def _(msg: Bot.MessageSession, mod_name: str, version: str = None):
         else:
             await msg.finish(I18NContext("mod_dl.message.invalid.non_digital"))
 
-        if mod_info[0] == "modrinth":  # modrinth mod
+        if mod_info and mod_info[0] == "modrinth":  # modrinth mod
             if not ver:
-                reply2 = await msg.wait_reply(f"{msg.session_info.locale.t("mod_dl.message.version")}\n"
-                                              + "\n".join(mod_info[3])
-                                              + f"\n{msg.session_info.locale.t("mod_dl.message.version.prompt")}",
-                                              delete=True)
+                reply2 = await msg.wait_reply(
+                    f"{msg.session_info.locale.t('mod_dl.message.version')}\n"
+                    + "\n".join(mod_info[3])
+                    + f"\n{msg.session_info.locale.t('mod_dl.message.version.prompt')}",
+                    delete=True,
+                )
                 replied2 = reply2.as_display(text_only=True)
                 if replied2 in mod_info[3]:
                     version_info = await get_modrinth_project_version(mod_info[2], replied2)
                     if version_info:
-                        await msg.finish(
-                            f"{" ".join(version_info["loaders"])}\n{msg.session_info.locale.t("mod_dl.message.download_url")}{version_info["files"][0]["url"]}\n{msg.session_info.locale.t("mod_dl.message.filename")}{version_info["files"][0]["filename"]}")
+                        files = version_info.get("files", [])
+                        if files:
+                            await msg.finish(
+                                f"{' '.join(version_info.get('loaders', []))}\n{msg.session_info.locale.t('mod_dl.message.download_url')}{files[0].get('url', '')}\n{msg.session_info.locale.t('mod_dl.message.filename')}{files[0].get('filename', '')}"
+                            )
                 else:
                     await msg.finish()
             elif ver not in mod_info[3]:
@@ -166,19 +172,26 @@ async def _(msg: Bot.MessageSession, mod_name: str, version: str = None):
             elif ver in mod_info[3]:
                 version_info = await get_modrinth_project_version(mod_info[2], ver)
                 if version_info:
-                    await msg.finish(
-                        f"{" ".join(version_info["loaders"])}\n{msg.session_info.locale.t("mod_dl.message.download_url")}{version_info["files"][0]["url"]}\n{msg.session_info.locale.t("mod_dl.message.filename")}{version_info["files"][0]["filename"]}")
+                    files = version_info.get("files", [])
+                    if files:
+                        await msg.finish(
+                            f"{' '.join(version_info.get('loaders', []))}\n{msg.session_info.locale.t('mod_dl.message.download_url')}{files[0].get('url', '')}\n{msg.session_info.locale.t('mod_dl.message.filename')}{files[0].get('filename', '')}"
+                        )
         else:  # curseforge mod
-            version_index, ver_list = await get_curseforge_mod_version_index(mod_info[2]), []
+            version_index = await get_curseforge_mod_version_index(mod_info[2]) or []
+            ver_list = []
             for version_ in version_index:
-                if version_["gameVersion"] not in ver_list:
-                    ver_list.append(version_["gameVersion"])
+                game_version = version_.get("gameVersion", "")
+                if game_version not in ver_list:
+                    ver_list.append(game_version)
             if version_index:
                 if not ver:
-                    reply2 = await msg.wait_reply(f"{msg.session_info.locale.t("mod_dl.message.version")}\n" +
-                                                  "\n".join(ver_list) +
-                                                  f"\n{msg.session_info.locale.t("mod_dl.message.version.prompt")}",
-                                                  delete=True)
+                    reply2 = await msg.wait_reply(
+                        f"{msg.session_info.locale.t('mod_dl.message.version')}\n"
+                        + "\n".join(ver_list)
+                        + f"\n{msg.session_info.locale.t('mod_dl.message.version.prompt')}",
+                        delete=True,
+                    )
                     ver = reply2.as_display(text_only=True)
                 elif ver not in ver_list:
                     await msg.finish(I18NContext("mod_dl.message.version.not_found"))
@@ -186,8 +199,10 @@ async def _(msg: Bot.MessageSession, mod_name: str, version: str = None):
                 if ver in ver_list:
                     file_info = await get_curseforge_mod_file(mod_info[2], ver)
                     if file_info:
-                        await msg.finish(f"{" ".join(file_info["gameVersions"])} \
-                                         \n{msg.session_info.locale.t("mod_dl.message.download_url")}{file_info["downloadUrl"]} \
-                                         \n{msg.session_info.locale.t("mod_dl.message.filename")}{file_info["fileName"]}")
+                        await msg.finish(
+                            f"{' '.join(file_info.get('gameVersions', []))} \
+                                         \n{msg.session_info.locale.t('mod_dl.message.download_url')}{file_info.get('downloadUrl', '')} \
+                                         \n{msg.session_info.locale.t('mod_dl.message.filename')}{file_info.get('fileName', '')}"
+                        )
                 else:
                     await msg.finish(I18NContext("mod_dl.message.version.not_found"))

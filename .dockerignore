@@ -1,0 +1,11 @@
+.git
+.github
+.deepsource.toml
+.editorconfig
+.gitignore
+.pre-commit-config.yaml
+crowdin.yml
+requirements.txt
+renovate.json
+start
+start.bat

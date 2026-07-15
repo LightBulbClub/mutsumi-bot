@@ -1,3 +1,10 @@
+"""
+会话信息模块 - 定义和管理消息会话的信息和上下文。
+
+该模块定义了 SessionInfo 类，用于承载一个消息会话的所有相关信息，
+包括目标、发送者、平台特性、权限信息等。
+"""
+
 from __future__ import annotations
 
 import uuid
@@ -7,15 +14,32 @@ from attrs import define
 
 from core.alive import Alive
 from core.builtins.message.chain import MessageChain
+from core.builtins.session.features import Features
 from core.builtins.utils import command_prefix
 from core.config import Config
 from core.database.models import TargetInfo, SenderInfo
 from core.i18n import Locale
 from core.utils.func import parse_time_string
+from core.utils.session import inject_features
 
 
 @define
 class SessionInfo:
+    """
+    会话信息类 - 承载一个消息会话的完整信息。
+
+    该类使用 attrs 装饰器，存储了一个消息会话所需的所有信息，
+    包括目标和发送者信息、消息内容、平台特性、权限和配置等。
+
+    属性分类说明:
+    - 基本信息: target_id, target_from, client_name, sender_id, sender_from 等
+    - 消息信息: message_id, reply_id, messages 等
+    - 平台能力: support_* 系列标志
+    - 用户权限: superuser, banned_users, custom_admins 等
+    - 数据库模型: target_info, sender_info
+    - 系统配置: locale, prefixes, ctx_slot 等
+    """
+
     target_id: str
     target_from: str
     client_name: str
@@ -39,6 +63,7 @@ class SessionInfo:
     support_rss: bool = False
     support_typing: bool = False
     support_wait: bool = False
+    support_handle_message_nodes: bool = False
     timestamp: float | None = None
     session_id: str | None = None
     target_info: TargetInfo | None = None
@@ -59,35 +84,32 @@ class SessionInfo:
     require_check_dirty_words: bool = False
     use_url_manager: bool = False
     use_url_md_format: bool = False
-    running_mention: bool = True
+    use_running_mention: bool = True
     tmp: dict[str, str] | None = {}
 
     @classmethod
-    async def assign(cls, target_id: str,
-                     client_name: str | None = None,
-                     target_from: str | None = None,
-                     sender_id: str | None = None,
-                     sender_from: str | None = None,
-                     sender_name: str | None = None,
-                     message_id: str | None = None,
-                     reply_id: str | None = None,
-                     messages: MessageChain | None = None,
-                     prefixes: list[str] | None = None,
-                     ctx_slot: int = 0,
-                     fetch: bool = False,
-                     create: bool = True,
-                     require_enable_modules: bool = True,
-                     require_check_dirty_words: bool = False,
-                     use_url_manager: bool = False,
-                     use_url_md_format: bool = False,
-                     running_mention: bool = True,
-                     tmp: dict[str, str] | None = None
-                     ) -> SessionInfo:
-
+    async def assign(
+        cls,
+        target_id: str,
+        client_name: str | None = None,
+        target_from: str | None = None,
+        sender_id: str | None = None,
+        sender_from: str | None = None,
+        sender_name: str | None = None,
+        message_id: str | None = None,
+        reply_id: str | None = None,
+        messages: MessageChain | None = None,
+        prefixes: list[str] | None = [],  # skipcq
+        ctx_slot: int = 0,
+        fetch: bool = False,
+        create: bool = True,
+        features: Features | None = None,
+        tmp: dict[str, str] | None = None,
+    ) -> SessionInfo:
         """
-        用于将参数传入SessionInfo对象中。
+        用于将参数传入 SessionInfo 对象中。
 
-        :return: SessionInfo对象。
+        :return: SessionInfo 对象。
         """
         if target_from is None:
             target_from = Alive.determine_target_from(target_id)
@@ -105,13 +127,15 @@ class SessionInfo:
         locale = Locale(target_info.locale)
         bot_name = locale.t("bot_name")
         _tz_offset = target_info.target_data.get("tz_offset", Config("timezone_offset", "+8"))
-        prefixes = target_info.target_data.get("command_prefix", []) + command_prefix.copy() + (prefixes or [])
-        if fetch:
-            ctx_slot = 999
+        prefixes = (
+            (prefixes + (target_info.target_data.get("command_prefix", []) + command_prefix.copy()))
+            if prefixes is not None
+            else []
+        )
 
         tmp = tmp or {}
 
-        return cls(
+        _c = cls(
             target_id=target_id,
             target_from=target_from,
             client_name=client_name,
@@ -137,14 +161,21 @@ class SessionInfo:
             prefixes=prefixes,
             ctx_slot=ctx_slot,
             fetch=fetch,
-            require_enable_modules=require_enable_modules,
-            require_check_dirty_words=require_check_dirty_words,
-            use_url_manager=use_url_manager,
-            use_url_md_format=use_url_md_format,
-            running_mention=running_mention,
             tmp=tmp,
-
         )
+
+        if features:
+            _c = inject_features(session=_c, features=features)
+
+        if fetch:
+            get_params = Alive.get_infos(client_name)
+            if get_params:
+                _c.ctx_slot = get_params.get("ctx_slot_index", 999)
+                features = get_params.get("features", None)
+                if features:
+                    _c = inject_features(session=_c, features=features)
+
+        return _c
 
     async def refresh_info(self):
         self.sender_info = await SenderInfo.get_by_sender_id(self.sender_id) if self.sender_id else None

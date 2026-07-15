@@ -1,10 +1,10 @@
 import re
 import shutil
 import time
-
-from akari_bot_webrender.functions.options import StatusOptions
+import traceback
 
 import orjson
+from akari_bot_webrender.functions.options import StatusOptions
 
 from core.alive import Alive
 from core.builtins.bot import Bot
@@ -90,9 +90,11 @@ async def _():
 set_ = module("set", required_superuser=True, base=True, doc=True)
 
 
-@set_.command("target module enable <target> <modules> ...",
-              "target module disable <target> <modules> ...",
-              "target module list <target>")
+@set_.command(
+    "target module enable <target> <modules> ...",
+    "target module disable <target> <modules> ...",
+    "target module list <target>",
+)
 async def _(msg: Bot.MessageSession, target: str):
     if not Alive.determine_target_from(target):
         await msg.finish(I18NContext("message.id.invalid.target", target=msg.session_info.target_from))
@@ -104,21 +106,20 @@ async def _(msg: Bot.MessageSession, target: str):
         target_info = await TargetInfo.create(target_id=target)
     if "enable" in msg.parsed_msg:
         modules = [
-            m for m in [
-                msg.parsed_msg["<modules>"]] +
-            msg.parsed_msg.get(
-                "...",
-                []) if m in ModulesManager.return_modules_list(
-                msg.session_info.target_from,
-                client_name=msg.session_info.client_name)]
+            m
+            for m in [msg.parsed_msg["<modules>"]] + msg.parsed_msg.get("...", [])
+            if m
+            in ModulesManager.return_modules_list(
+                msg.session_info.target_from, client_name=msg.session_info.client_name
+            )
+        ]
         await target_info.config_module(modules, True)
         if modules:
             await msg.finish(I18NContext("core.message.set.module.enable.success", modules=", ".join(modules)))
         else:
             await msg.finish(I18NContext("core.message.set.module.enable.failed"))
     elif "disable" in msg.parsed_msg:
-        modules = [m for m in [msg.parsed_msg["<modules>"]] + msg.parsed_msg.get("...", [])
-                   if m in target_info.modules]
+        modules = [m for m in [msg.parsed_msg["<modules>"]] + msg.parsed_msg.get("...", []) if m in target_info.modules]
         await target_info.config_module(modules, False)
         if modules:
             await msg.finish(I18NContext("core.message.set.module.disable.success", modules=", ".join(modules)))
@@ -132,11 +133,9 @@ async def _(msg: Bot.MessageSession, target: str):
             await msg.finish(I18NContext("core.message.set.module.list.none"))
 
 
-@set_.command("target data get <target> [<k>]",
-              "target data edit <target> <k> <v>",
-              "target data delete <target> <k>")
+@set_.command("target data get <target> [<k>]", "target data edit <target> <k> <v>", "target data delete <target> <k>")
 async def _(msg: Bot.MessageSession, target: str):
-    if not Alive.determine_sender_from(target):
+    if not Alive.determine_target_from(target):
         await msg.finish(I18NContext("message.id.invalid.target", target=msg.session_info.target_from))
     target_info = await TargetInfo.get_by_target_id(target, create=False)
     if not target_info:
@@ -156,7 +155,7 @@ async def _(msg: Bot.MessageSession, target: str):
         if isinstance(v, str):
             if re.match(r"\[.*\]|\{.*\}", v):
                 try:
-                    v = v.replace("\'", "\"")
+                    v = v.replace("'", '"')
                     v = orjson.loads(v)
                 except orjson.JSONDecodeError as e:
                     Logger.error(str(e))
@@ -173,9 +172,7 @@ async def _(msg: Bot.MessageSession, target: str):
         await msg.finish(I18NContext("message.success"))
 
 
-@set_.command("sender data get <user> [<k>]",
-              "sender data edit <user> <k> <v>",
-              "sender data delete <user> <k>")
+@set_.command("sender data get <user> [<k>]", "sender data edit <user> <k> <v>", "sender data delete <user> <k>")
 async def _(msg: Bot.MessageSession, user: str):
     if not Alive.determine_sender_from(user):
         await msg.finish(I18NContext("message.id.invalid.sender", sender=msg.session_info.sender_from))
@@ -197,7 +194,7 @@ async def _(msg: Bot.MessageSession, user: str):
         if isinstance(v, str):
             if re.match(r"\[.*\]|\{.*\}", v):
                 try:
-                    v = v.replace("\'", "\"")
+                    v = v.replace("'", '"')
                     v = orjson.loads(v)
                 except orjson.JSONDecodeError as e:
                     Logger.error(str(e))
@@ -214,12 +211,7 @@ async def _(msg: Bot.MessageSession, user: str):
         await msg.finish(I18NContext("message.success"))
 
 
-post_whitelist = module(
-    "post_whitelist",
-    required_superuser=True,
-    base=True,
-    doc=True,
-    available_for="QQ")
+post_whitelist = module("post_whitelist", required_superuser=True, base=True, doc=True, available_for="QQ")
 
 
 @post_whitelist.command("<group_id>")
@@ -275,7 +267,8 @@ async def _(msg: Bot.MessageSession, user: str, count: int = 1):
     if sender_info.warns > WARNING_COUNTS >= 1 and not sender_info.trusted:
         await sender_info.switch_identity(trust=False)
     await msg.finish(
-        I18NContext("core.message.abuse.warn.success", sender=user, count=count, warn_count=sender_info.warns))
+        I18NContext("core.message.abuse.warn.success", sender=user, count=count, warn_count=sender_info.warns)
+    )
 
 
 @ae.command("revoke <user> [<count>]")
@@ -289,7 +282,8 @@ async def _(msg: Bot.MessageSession, user: str, count: int = 1):
         sender_info = await SenderInfo.create(sender_id=user)
     await sender_info.warn_user(-count)
     await msg.finish(
-        I18NContext("core.message.abuse.revoke.success", sender=user, count=count, warn_count=sender_info.warns))
+        I18NContext("core.message.abuse.revoke.success", sender=user, count=count, warn_count=sender_info.warns)
+    )
 
 
 @ae.command("clear <user>")
@@ -404,34 +398,33 @@ async def pull_repo():
 
 
 async def update_dependencies():
-    returncode, poetry_install, _ = await run_sys_command(["poetry", "install"], timeout=60)
-    if returncode == 0 and poetry_install:
-        return poetry_install
+    returncode, _, uv_sync = await run_sys_command(["uv", "sync"], timeout=60)
+    if returncode == 0:
+        return uv_sync
     _, pip_install, _ = await run_sys_command(["pip", "install", "-r", "requirements.txt"], timeout=60)
     return "..." + pip_install[-500:] if len(pip_install) > 500 else pip_install
 
 
-@upd.command()
+@upd.command("[--force-im-sure-what-i-am-doing]")
 async def _(msg: Bot.MessageSession):
+    if msg.parsed_msg and msg.parsed_msg.get("--force-im-sure-what-i-am-doing", False) and not Bot.Info.binary_mode:
+        await pull_repo()
+        await update_dependencies()
+        return
     if not Bot.Info.binary_mode:
-        if Bot.Info.version:
+        if Bot.Info.version and Bot.Info.version.startswith("git:"):
             pull_repo_result = await pull_repo()
             if pull_repo_result:
                 await msg.send_message(Plain(pull_repo_result, disable_joke=True))
 
         update_dependencies_result = await update_dependencies()
-        await msg.finish(Plain(update_dependencies_result, disable_joke=True))
+        if update_dependencies_result:
+            await msg.finish(Plain(update_dependencies_result, disable_joke=True))
     else:
         await msg.finish(I18NContext("core.message.update.binary_mode"))
 
 
-rst = module(
-    "restart",
-    required_superuser=True,
-    base=True,
-    doc=True,
-    exclude_from=["Web"],
-    load=Bot.Info.subprocess)
+rst = module("restart", required_superuser=True, base=True, doc=True, exclude_from=["Web"], load=Bot.Info.subprocess)
 
 
 def write_restart_cache(msg: Bot.MessageSession):
@@ -455,15 +448,27 @@ async def wait_for_restart(msg: Bot.MessageSession):
         await msg.send_message(I18NContext("core.message.restart.timeout"))
 
 
-@rst.command()
+@rst.command("[--force-im-sure-what-i-am-doing]")
 async def _(msg: Bot.MessageSession):
-    if await msg.wait_confirm(append_instruction=False):
-        restart_time.append(time.time())
-        await wait_for_restart(msg)
-        write_restart_cache(msg)
+    if msg.parsed_msg and msg.parsed_msg.get("--force-im-sure-what-i-am-doing", False):
         await restart()
-    else:
-        await msg.finish()
+    try:
+        if not await msg.wait_confirm(append_instruction=False):
+            await msg.finish()
+        else:
+            if not restart_time:
+                restart_time.append(time.time())
+            await wait_for_restart(msg)
+    except Exception:
+        Logger.critical("Failed to send restart confirmation message, perhaps bug? Force restart...")
+        Logger.critical(traceback.format_exc())
+    try:
+        restart_time.append(time.time())
+        write_restart_cache(msg)
+    except Exception:
+        Logger.critical("Failed to write restart info cache, perhaps bug? Continue...")
+        Logger.critical(traceback.format_exc())
+    await restart()
 
 
 upds = module(
@@ -473,25 +478,48 @@ upds = module(
     base=True,
     doc=True,
     exclude_from=["Web"],
-    load=Bot.Info.subprocess)
+    load=Bot.Info.subprocess,
+)
 
 
-@upds.command()
+@upds.command("[--force-im-sure-what-i-am-doing]")
 async def _(msg: Bot.MessageSession):
+    if msg.parsed_msg and msg.parsed_msg.get("--force-im-sure-what-i-am-doing", False):
+        if Bot.Info.version and Bot.Info.version.startswith("git:"):
+            await pull_repo()
+        await restart()
     if not Bot.Info.binary_mode:
-        if await msg.wait_confirm(append_instruction=False):
+        try:
+            if not await msg.wait_confirm(append_instruction=False):
+                await msg.finish()
+            else:
+                if not restart_time:
+                    restart_time.append(time.time())
+                await wait_for_restart(msg)
+        except Exception:
+            Logger.critical("Failed to send restart confirmation message, perhaps bug? Force restart...")
+            Logger.critical(traceback.format_exc())
+        try:
             restart_time.append(time.time())
-            await wait_for_restart(msg)
             write_restart_cache(msg)
-            if Bot.Info.version:
+        except Exception:
+            Logger.critical("Failed to write restart info cache, perhaps bug? Continue...")
+            Logger.critical(traceback.format_exc())
+        if Bot.Info.version and Bot.Info.version.startswith("git:"):
+            try:
                 pull_repo_result = await pull_repo()
                 if pull_repo_result:
                     await msg.send_message(Plain(pull_repo_result, disable_joke=True))
+            except Exception:
+                Logger.critical("Failed to send pull result message, perhaps bug? Continue...")
+                Logger.critical(traceback.format_exc())
+        try:
             update_dependencies_result = await update_dependencies()
             await msg.send_message(Plain(update_dependencies_result, disable_joke=True))
-            await restart()
-        else:
-            await msg.finish()
+        except Exception:
+            Logger.critical("Failed to send update dependencies result message, perhaps bug? Continue...")
+            Logger.critical(traceback.format_exc())
+        await restart()
     else:
         await msg.finish(I18NContext("core.message.update.binary_mode"))
 
@@ -526,7 +554,7 @@ async def _(msg: Bot.MessageSession):
         await msg.send_message(I18NContext("core.message.resume.skip", counts=len(targets)))
         for x in targets:
             if x["i18n"]:
-                await x["fetch"].send_direct_message(I18NContext(x["message"]))
+                await x["fetch"].send_direct_message(I18NContext(x["message"], **x["kwargs"]))
             else:
                 await x["fetch"].send_direct_message(x["message"])
             Bot.Temp.data["waiting_for_send_group_message"].remove(x)
@@ -564,9 +592,7 @@ echo = module("echo", required_superuser=True, base=True, doc=True)
 
 @echo.command()
 async def _(msg: Bot.MessageSession):
-    dis = await msg.wait_next_message(I18NContext("core.message.echo.prompt"),
-                                      delete=True,
-                                      append_instruction=False)
+    dis = await msg.wait_next_message(I18NContext("core.message.echo.prompt"), delete=True, append_instruction=False)
     if dis:
         try:
             dis = dis.as_display()
@@ -598,7 +624,6 @@ async def _(msg: Bot.MessageSession, display_msg: str):
 rse = module("raise", required_superuser=True, base=True, doc=True)
 
 
-@rse.command()
 @rse.command("[<args>]")
 async def _(msg: Bot.MessageSession, args: str = None):
     e = args or "{I18N:core.message.raise}"
@@ -656,7 +681,7 @@ async def _(msg: Bot.MessageSession, k: str, v: str, table_name: str = None):
         v = float(v)
     elif re.match(r"\[.*\]", v):
         try:
-            v = v.replace("\'", "\"")
+            v = v.replace("'", '"')
             v = orjson.loads(v)
         except orjson.JSONDecodeError as e:
             Logger.error(str(e))
@@ -690,7 +715,8 @@ decry = module("decrypt", required_superuser=True, base=True, doc=True)
 
 @decry.command("<display_msg>")
 async def _(msg: Bot.MessageSession):
-    dec = decrypt_string(msg.as_display().split(" ", 1)[1])
+    parts = msg.as_display().split(" ", 1)
+    dec = decrypt_string(parts[1]) if len(parts) > 1 else None
     if dec:
         await msg.finish(dec)
     else:
