@@ -1,6 +1,2 @@
 #!/usr/bin/env sh
-<<<<<<< HEAD
-=======
-export PYTHONPATH=$PYTHONPATH:$(pwd)
->>>>>>> 46ba72bf087c5730d796c00e8f34920880bd39a5
 uv run python bot.py
