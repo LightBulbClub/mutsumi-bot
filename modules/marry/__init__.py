@@ -44,7 +44,7 @@ async def marry(msg: Bot.MessageSession, change: bool, is_husband: bool = False)
             [
                 Plain(f"你今天的老{"公" if is_husband else "婆"}是"),
                 Plain(now.split(".")[0]),
-                Image(assets / wife_now),
+                Image(assets / ("husband" if is_husband else "wife") / now),
             ]
         )
     _ = (await TodayWifeInfo.get_wife(sender_id=_id, name=chose)) \
@@ -53,7 +53,7 @@ async def marry(msg: Bot.MessageSession, change: bool, is_husband: bool = False)
         [
             Plain(f"成功！你今天的老{"公" if is_husband else "婆"}是"),
             Plain(chose.split(".")[0]),
-            Image(assets / chose),
+            Image(assets / ("husband" if is_husband else "wife") / chose),
         ]
     )
 
