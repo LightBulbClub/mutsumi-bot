@@ -55,7 +55,7 @@ async def marry(msg: Bot.MessageSession, change: bool, is_husband: bool = False)
         [
             Plain(f"成功！你今天的老{"公" if is_husband else "婆"}是"),
             Plain(chosen),
-            Image(assets / ("husband" if is_husband else "wife") / chose / random.sample(chosen_files, 1)[0]),
+            Image(assets / ("husband" if is_husband else "wife") / chosen / random.sample(chosen_files, 1)[0]),
         ]
     )
 
