@@ -122,6 +122,57 @@ match_hash_cache = ExpiringTempDict()
 session_msg_cache = {}
 
 
+def _should_ignore_message(msg: "Bot.MessageSession") -> bool:
+    """检查消息是否应当被忽略（忽略列表、空消息、其他 bot 消息）。"""
+    if msg.session_info.sender_id in ignored_sender:
+        return True
+    if len(msg.trigger_msg) == 0:
+        return True
+
+    bots_id = msg.session_info.target_info.target_data.get("bots_id", [])
+    if msg.session_info.sender_id in bots_id:
+        Logger.debug("Ignored message from other clients: " + msg.trigger_msg)
+        return True
+
+    return False
+
+
+def _is_sender_blocked(msg: "Bot.MessageSession") -> bool:
+    """检查发送者是否被屏蔽。"""
+    if msg.session_info.sender_info.blocked and not (
+        msg.session_info.sender_info.trusted or msg.session_info.sender_info.superuser
+    ):
+        return True
+    if msg.session_info.sender_id in msg.session_info.banned_users and not msg.session_info.superuser:
+        return True
+    return False
+
+
+async def _check_required_privilege(msg: "Bot.MessageSession", obj, bot: "Bot") -> str | None:
+    """
+    检查对象所需的权限是否满足。
+
+    :param msg: 消息会话对象
+    :param obj: 需要检查权限的对象（模块、命令或正则函数）
+    :param bot: Bot 实例
+    :return: 未满足的权限级别（"base_superuser" / "superuser" / "admin"），
+             若权限满足则返回 None
+    """
+    if obj.required_base_superuser:
+        if msg.session_info.sender_id not in bot.base_superuser_list:
+            return "base_superuser"
+        return None
+    if obj.required_superuser:
+        if not msg.check_super_user():
+            return "superuser"
+        return None
+    if obj.required_admin:
+        if not await msg.check_permission():
+            return "admin"
+        return None
+    return None
+
+
 async def parser(msg: "Bot.MessageSession"):
     """
     消息处理的主入口函数。
@@ -149,12 +200,11 @@ async def parser(msg: "Bot.MessageSession"):
     # 创建标识字符串用于日志记录
     identify_str = f"[{msg.session_info.sender_id} ({msg.session_info.target_id})]"
 
-    # 检查发送者是否在忽略列表中
     if msg.session_info.sender_id in ignored_sender:
         return
 
     try:
-        # ========== 步骤 1: 检查任务队列 ==========
+        # ========== 步骤 1: 检查任务队列并初始化 ==========
         # 检查是否有等待此消息的任务（如等待用户回复）
         await SessionTaskManager.check(msg)
 
@@ -164,27 +214,11 @@ async def parser(msg: "Bot.MessageSession"):
         # 将消息转换为易读的显示格式
         msg.trigger_msg = normalize_space(msg.as_display())
 
-        # 如果消息为空，直接返回
-        if len(msg.trigger_msg) == 0:
+        if _should_ignore_message(msg):
             return
-
-        # 获取会话内已记录的其它 bot id，屏蔽 bot 的消息
-        bots_id = msg.session_info.target_info.target_data.get("bots_id", [])
-        if bots_id:
-            for b in bots_id:
-                if msg.session_info.sender_id == b:
-                    Logger.debug("Ignored message from other clients: " + msg.trigger_msg)
-                    return
 
         # ========== 步骤 2: 权限检查 ==========
-        # 检查发送者是否被被机器人屏蔽（机器人黑名单）
-        if msg.session_info.sender_info.blocked and not (
-            msg.session_info.sender_info.trusted or msg.session_info.sender_info.superuser
-        ):
-            return
-
-        # 检查发送者是否在会话的屏蔽用户列表中（会话黑名单）
-        if msg.session_info.sender_id in msg.session_info.banned_users and not msg.session_info.superuser:
+        if _is_sender_blocked(msg):
             return
 
         # ========== 步骤 3: 命令匹配 ==========
@@ -718,18 +752,8 @@ async def _execute_regex(msg: "Bot.MessageSession", modules, identify_str):
                 regex_module: Module = modules[m]
 
                 # ========== 步骤 2: 权限检查 ==========
-                if regex_module.required_base_superuser:
-                    # 需要基础超级用户权限
-                    if msg.session_info.sender_id not in bot.base_superuser_list:
-                        continue
-                elif regex_module.required_superuser:
-                    # 需要超级用户权限
-                    if not msg.check_super_user():
-                        continue
-                elif regex_module.required_admin:
-                    # 需要管理员权限
-                    if not await msg.check_permission():
-                        continue
+                if await _check_required_privilege(msg, regex_module, bot):
+                    continue
 
                 # ========== 步骤 3: 检查模块可用性和平台限制 ==========
                 if (
@@ -1046,19 +1070,13 @@ async def _execute_module_command(msg: "Bot.MessageSession", module, command_fir
             Logger.trace("Parsed message: " + str(msg.parsed_msg))
 
             # ========== 步骤 2: 验证发送者权限 ==========
-
-            if command.required_base_superuser:
-                if msg.session_info.sender_id not in bot.base_superuser_list:
-                    await msg.send_message(I18NContext("parser.superuser.permission.denied"))
-                    return
-            elif command.required_superuser:
-                if not msg.check_super_user():
-                    await msg.send_message(I18NContext("parser.superuser.permission.denied"))
-                    return
-            elif command.required_admin:
-                if not await msg.check_permission():
+            denied_privilege = await _check_required_privilege(msg, command, bot)
+            if denied_privilege:
+                if denied_privilege == "admin":
                     await msg.send_message(I18NContext("parser.admin.permission.denied.command"))
-                    return
+                else:
+                    await msg.send_message(I18NContext("parser.superuser.permission.denied"))
+                return
 
             # ========== 步骤 3: 检查命令是否在会话内有效 ==========
 
@@ -1301,24 +1319,21 @@ async def _process_exception(msg: "Bot.MessageSession", e: Exception):
 
 
 def __get_close_matches(
-    word: str, possibilities: list[str], n: int = 3, cutoff: float = 0.6, return_scores: bool = False
-) -> list[str] | list[tuple]:
-    """使用 RapidFuzz 查找最接近的匹配项
+    word: str,
+    possibilities: list[str],
+    n: int = 3,
+    cutoff: float = 0.6,
+    return_scores: bool = False,
+) -> list[str] | list[tuple[str, float]]:
+    """使用 RapidFuzz 查找最接近的匹配项。
 
     :param word: 目标搜索字符串。
-    :type word: str
     :param possibilities: 候选字符串列表。
-    :type possibilities: List[str]
     :param n: 最大返回结果数量，默认为 3。
-    :type n: int
     :param cutoff: 相似度阈值 (0.0-1.0)，低于此值的结果将被忽略，默认为 0.6。
-    :type cutoff: float
     :param return_scores: 若为 True，返回包含分数的元组列表；否则仅返回字符串列表。
-    :type return_scores: bool
-
-    :return: 匹配结果列表。若 return_scores 为 False，返回 List[str]；
-             否则返回 List[Tuple[str, float]]，其中分数已归一化为 0.0-1.0。
-    :rtype: Union[List[str], List[tuple]]
+    :return: 匹配结果列表。若 return_scores 为 False，返回 list[str]；
+             否则返回 list[tuple[str, float]]，其中分数已归一化为 0.0-1.0。
     """
     if not 0.0 <= cutoff <= 1.0:
         raise ValueError("cutoff must be between 0.0 and 1.0")
@@ -1360,25 +1375,179 @@ async def _typo_confirm(
     return None, None, True
 
 
+def _filter_available_modules(modules: dict, msg: "Bot.MessageSession", bot: "Bot") -> list[str]:
+    """根据权限、启用状态等条件过滤出用户可用的模块名列表。"""
+    is_base_superuser = msg.session_info.sender_id in bot.base_superuser_list
+    is_superuser = msg.check_super_user()
+    available = []
+
+    for name, module in modules.items():
+        if not (module.base or name in msg.session_info.enabled_modules):
+            continue
+        if module.hidden:
+            continue
+        if module.required_superuser and not is_superuser:
+            continue
+        if module.required_base_superuser and not is_base_superuser:
+            continue
+        if not module.command_list.get(msg.session_info.target_from):
+            continue
+        available.append(name)
+
+    return available
+
+
+def _find_close_module(command_first_word: str, available_modules: list[str]) -> str | None:
+    """使用 rapidfuzz 查找最接近的模块名，并进行长度差异过滤。"""
+    if not available_modules:
+        return None
+
+    matches = __get_close_matches(command_first_word, available_modules, 1, typo_check_module_score)
+    if not matches:
+        return None
+
+    matched = matches[0]
+    input_len = len(command_first_word)
+    match_len = len(matched)
+    if input_len != match_len:
+        max_len = max(input_len, match_len)
+        min_len = min(input_len, match_len)
+        if min_len / max_len < typo_check_module_diff_ratio:
+            Logger.debug(
+                f"Module name length difference too large: "
+                f"input='{command_first_word}'({input_len}), match='{matched}'({match_len}), "
+                f"ratio={min_len / max_len:.2f} < {typo_check_module_diff_ratio}"
+            )
+            return None
+
+    Logger.debug(f"Match module: {command_first_word} -> {matched}")
+    return matched
+
+
+def _has_command_templates(module: Module, target_from: str) -> bool:
+    """检查模块在指定平台是否有命令模板。"""
+    for func in module.command_list.get(target_from):
+        if func.command_template:
+            return True
+    return False
+
+
+def _group_templates_by_arg_count(commands: list[CommandMeta], target_from: str) -> dict[int, list[argsTemplate]]:
+    """按参数数量对命令模板分组。"""
+    grouped: dict[int, list[argsTemplate]] = {}
+    for func in commands:
+        templates = copy.deepcopy(func.command_template)
+        for template in templates:
+            template.args_ = [a for a in template.args if isinstance(a, ArgumentPattern)]
+            arg_count = len(template.args)
+            grouped.setdefault(arg_count, []).append(template)
+    return grouped
+
+
+def _select_templates_by_arg_count(grouped_templates: dict[int, list], user_arg_count: int) -> list:
+    """根据用户输入参数数量选择最合适的模板组。"""
+    max_template_args = max(grouped_templates.keys())
+    if user_arg_count > max_template_args:
+        return grouped_templates[max_template_args]
+
+    if user_arg_count in grouped_templates:
+        return grouped_templates[user_arg_count]
+
+    closest_count = min(grouped_templates.keys(), key=lambda k: abs(k - user_arg_count))
+    return grouped_templates[closest_count]
+
+
+def _find_close_command(user_args_str: str, templates: list, user_arg_count: int) -> str | None:
+    """在模板组中查找与用户输入最相似的命令字符串。"""
+    selected_arg_count = len(templates[0].args)
+    max_count = max(user_arg_count, selected_arg_count)
+    min_count = min(user_arg_count, selected_arg_count)
+
+    if max_count > 0 and min_count / max_count < typo_check_args_diff_ratio:
+        Logger.debug(
+            f"Word count difference too large: user={user_arg_count}, template={selected_arg_count}, "
+            f"ratio={min_count / max_count:.2f} < {typo_check_args_diff_ratio}"
+        )
+        return None
+
+    matches = __get_close_matches(user_args_str, templates_to_str(templates), 1, typo_check_command_score)
+    if not matches:
+        return None
+
+    Logger.debug(f"Match command: {user_args_str} -> {matches[0]}")
+    return matches[0]
+
+
+def _merge_optional_part(option_part: str, remaining_args: list[str], new_command: list[str]) -> None:
+    """将可选参数片段合并到重建的命令中。"""
+    option_tokens = option_part.split(" ")
+    if len(option_tokens) > 1:
+        flag = option_tokens[0][1:]
+        matches = __get_close_matches(flag, remaining_args, 1, typo_check_options_score)
+        if matches:
+            Logger.debug(f"Match close options: {flag} -> {matches[0]}")
+            position = remaining_args.index(matches[0])
+            new_command.append(flag)
+            new_command.extend(remaining_args[position + 1 : position + len(option_tokens)])
+            del remaining_args[position : position + len(option_tokens)]
+        return
+
+    inner = option_tokens[0][1:-1]
+    if inner.startswith("<"):
+        if remaining_args:
+            new_command.append(remaining_args[0])
+            del remaining_args[0]
+    else:
+        new_command.append(inner)
+
+
+def _merge_required_part(required_part: str, remaining_args: list[str], new_command: list[str]) -> None:
+    """将必需参数片段合并到重建的命令中。"""
+    for token in filter(None, required_part.split(" ")):
+        if not remaining_args:
+            new_command.append(token)
+            continue
+
+        if token.startswith("<"):
+            new_command.append(remaining_args[0])
+            del remaining_args[0]
+            continue
+
+        match_result = process.extractOne(remaining_args[0], [token], score_cutoff=typo_check_args_score * 100)
+        if match_result:
+            Logger.debug(f"Match close args: {remaining_args[0]} -> {match_result[0]}")
+            new_command.append(token)
+        else:
+            new_command.append(remaining_args[0])
+        del remaining_args[0]
+
+
+async def _rebuild_command_from_typo(
+    matched_command: str,
+    original_args: list[str],
+    matched_module_name: str,
+    msg: "Bot.MessageSession",
+):
+    """根据匹配到的命令模板和原始参数重建命令，并询问用户确认。"""
+    new_command = [matched_module_name]
+    remaining_args = original_args.copy()
+
+    for part in filter(None, re.split(r"(\[.*?])", matched_command)):
+        if part.startswith("["):
+            _merge_optional_part(part, remaining_args, new_command)
+        else:
+            _merge_required_part(part, remaining_args, new_command)
+
+    display_command = " ".join(new_command)
+    return await _typo_confirm(msg, display_command, new_command[0], display_command)
+
+
 async def _command_typo_check(msg: "Bot.MessageSession", modules, command_first_word):
     """
     命令错字检查和纠正。
 
     该函数实现了智能的错字纠正功能，当用户输入的命令无法匹配时，
     尝试找出最接近的正确命令并询问用户是否需要纠正。
-
-    纠正流程：
-    1. 模块名纠正：查找相似的模块名
-    2. 命令参数纠正：根据模板匹配相似的命令结构
-    3. 可选参数纠正：匹配可选标志和参数
-    4. 必需参数纠正：匹配必需参数
-    5. 询问用户确认：显示建议的命令并等待确认
-
-    相似度评分：
-    - 模块名阈值：typo_check_module_score (默认 0.6)
-    - 命令阈值：typo_check_command_score (默认 0.3)
-    - 选项阈值：typo_check_options_score (默认 0.3)
-    - 参数阈值：typo_check_args_score (默认 0.5)
 
     :param msg: 消息会话对象
     :param modules: 可用的模块字典
@@ -1388,193 +1557,37 @@ async def _command_typo_check(msg: "Bot.MessageSession", modules, command_first_
              - 如果用户拒绝或无法纠正，返回 (None, None, confirmed)
     """
     bot: "Bot" = exports["Bot"]
+    available_modules = _filter_available_modules(modules, msg, bot)
+    matched_module = _find_close_module(command_first_word, available_modules)
+    if not matched_module:
+        return None, None, False
 
-    # ========== 步骤 1: 获取用户权限 ==========
-    is_base_superuser = msg.session_info.sender_id in bot.base_superuser_list
-    is_superuser = msg.check_super_user()
+    module = modules[matched_module]
+    command_split = msg.trigger_msg.split(" ")
+    len_command_split = len(command_split)
+    user_arg_count = len_command_split - 1
 
-    # ========== 步骤 2: 收集用户可用的模块列表 ==========
-    available_modules = []
-    for x in modules:
-        # 筛选条件：基础模块或已启用的模块
-        if modules[x].base or (x in msg.session_info.enabled_modules):
-            # 跳过隐藏模块
-            if modules[x].hidden:
-                continue
-            # 跳过需要超级用户权限的模块（如果用户不是超级用户）
-            if modules[x].required_superuser and not is_superuser:
-                continue
-            # 跳过需要基础超级用户权限的模块
-            if modules[x].required_base_superuser and not is_base_superuser:
-                continue
-            # 跳过当前平台没有可用命令的模块（如仅含 regex 的模块，不能作为命令调用）
-            if not modules[x].command_list.get(msg.session_info.target_from):
-                continue
-            available_modules.append(x)
+    if not _has_command_templates(module, msg.session_info.target_from) or user_arg_count == 0:
+        new_trigger_msg = matched_module + (" " + " ".join(command_split[1:]) if len_command_split > 1 else "")
+        result = await _typo_confirm(msg, new_trigger_msg, matched_module, new_trigger_msg)
+        return result if result else (None, None, False)
 
-    # ========== 步骤 3: 模块名相似度匹配 ==========
-    # 使用 rapidfuzz 找出最接近的模块名
-    match_close_module: list = __get_close_matches(command_first_word, available_modules, 1, typo_check_module_score)
+    commands = module.command_list.get(msg.session_info.target_from)
+    grouped_templates = _group_templates_by_arg_count(commands, msg.session_info.target_from)
+    selected_templates = _select_templates_by_arg_count(grouped_templates, user_arg_count)
+    matched_command = _find_close_command(" ".join(command_split[1:]), selected_templates, user_arg_count)
 
-    if match_close_module:
-        # 找到了相似的模块
-        Logger.debug(f"Match module: {command_first_word} -> {match_close_module[0]}")
+    if matched_command:
+        result = await _rebuild_command_from_typo(matched_command, command_split[1:], matched_module, msg)
+        if result:
+            return result
+    elif user_arg_count == 1:
+        new_command_display = f"{matched_module} {' '.join(command_split[1:])}"
+        new_trigger_msg = " ".join([matched_module] + command_split[1:])
+        result = await _typo_confirm(msg, new_command_display, matched_module, new_trigger_msg)
+        if result:
+            return result
 
-        # ========== 步骤 3.5: 模块名字符长度差异检查 ==========
-        # 避免短输入匹配到过长的模块名（如 ~p → ~decrypt）
-        input_len = len(command_first_word)
-        match_len = len(match_close_module[0])
-        if input_len != match_len:
-            max_len = max(input_len, match_len)
-            min_len = min(input_len, match_len)
-            if min_len / max_len < typo_check_module_diff_ratio:
-                Logger.debug(
-                    f"Module name length difference too large: "
-                    f"input='{command_first_word}'({input_len}), match='{match_close_module[0]}'({match_len}), "
-                    f"ratio={min_len / max_len:.2f} < {typo_check_module_diff_ratio}"
-                )
-                match_close_module = []
-
-    if match_close_module:
-        module: Module = modules[match_close_module[0]]
-
-        # ========== 步骤 4: 检查模块是否有命令模板 ==========
-        none_template = True
-        for func in module.command_list.get(msg.session_info.target_from):
-            if func.command_template:
-                none_template = False
-                break
-
-        command_split = msg.trigger_msg.split(" ")
-        len_command_split = len(command_split)
-
-        # ========== 步骤 5: 命令参数匹配（仅对有模板的模块）==========
-        if not none_template and len_command_split > 1:
-            get_commands: list[CommandMeta] = module.command_list.get(msg.session_info.target_from)
-
-            # 根据参数数量对命令模板分组
-            # 格式: [参数数量 -> [模板列表]]
-            command_templates = {}
-            for func in get_commands:
-                command_template: list[argsTemplate] = copy.deepcopy(func.command_template)
-                for ct in command_template:
-                    # 只保留 ArgumentPattern（过滤描述等）
-                    ct.args_ = [a for a in ct.args if isinstance(a, ArgumentPattern)]
-                    if (len_args := len(ct.args)) not in command_templates:
-                        command_templates[len_args] = [ct]
-                    else:
-                        command_templates[len_args].append(ct)
-
-            # ========== 步骤 6: 选择最合适的命令模板组 ==========
-            max_template_args = max(command_templates.keys())
-            if len_command_split - 1 > max_template_args:
-                # 用户输入的参数比所有模板都多，选择参数最多的模板
-                select_templates = command_templates[max_template_args]
-            else:
-                try:
-                    # 选择参数数量刚好匹配的模板组
-                    select_templates = command_templates[len_command_split - 1]
-                except KeyError:
-                    # 没有精确匹配，找一个最接近的（参数数量差距最小）
-                    select_templates = command_templates[
-                        min(command_templates.keys(), key=lambda k: abs(k - (len_command_split - 1)))
-                    ]
-
-            # ========== 步骤 7: 参数数量差异检查 ==========
-            # 如果用户输入的参数数量与模板参数数量差异过大，跳过命令匹配
-            selected_arg_count = len(select_templates[0].args)
-            user_arg_count = len_command_split - 1
-            max_count = max(user_arg_count, selected_arg_count)
-            min_count = min(user_arg_count, selected_arg_count)
-
-            if max_count > 0 and min_count / max_count < typo_check_args_diff_ratio:
-                Logger.debug(
-                    f"Word count difference too large: user={user_arg_count}, template={selected_arg_count}, "
-                    f"ratio={min_count / max_count:.2f} < {typo_check_args_diff_ratio}"
-                )
-                match_close_command = []
-            else:
-                # ========== 步骤 8: 命令字符串相似度匹配 ==========
-                match_close_command: list = __get_close_matches(
-                    " ".join(command_split[1:]), templates_to_str(select_templates), 1, typo_check_command_score
-                )
-
-            if match_close_command:
-                # 找到了相似的命令
-                Logger.debug(f"Match command: {' '.join(command_split[1:])} -> {match_close_command[0]}")
-                match_split = match_close_command[0]
-
-                # ========== 步骤 9: 分离可选参数 ==========
-                # 切割可选参数（[...]）和必需参数
-                m_split_options = filter(None, re.split(r"(\[.*?\])", match_split))
-                old_command_split = command_split.copy()
-                del old_command_split[0]  # 删除模块名
-                new_command_split = [match_close_module[0]]
-                for m_ in m_split_options:
-                    if m_.startswith("["):  # 如果是可选参数
-                        m_split = m_.split(" ")  # 切割可选参数中的空格（说明存在多个子必须参数）
-                        if len(m_split) > 1:
-                            match_close_options = __get_close_matches(
-                                m_split[0][1:], old_command_split, 1, typo_check_options_score
-                            )  # 进一步匹配可选参数
-                            if match_close_options:
-                                Logger.debug(f"Match close options: {m_split[0][1:]} -> {match_close_options[0]}")
-                                position = old_command_split.index(match_close_options[0])  # 定位可选参数的位置
-                                new_command_split.append(m_split[0][1:])  # 将可选参数插入到新命令列表中
-                                new_command_split += old_command_split[position + 1 : position + len(m_split)]
-                                del old_command_split[position : position + len(m_split)]  # 删除原命令列表中的可选参数
-                        else:
-                            if m_split[0][1] == "<":
-                                if old_command_split:
-                                    new_command_split.append(old_command_split[0])
-                                    del old_command_split[0]
-                            else:
-                                new_command_split.append(m_split[0][1:-1])
-                    else:
-                        m__ = filter(None, m_.split(" "))  # 必须参数
-                        for mm in m__:
-                            if len(old_command_split) > 0:
-                                if mm.startswith("<"):
-                                    new_command_split.append(old_command_split[0])
-                                    del old_command_split[0]
-                                else:
-                                    # 直接检查相似度是否超过阈值（避免对单元素列表做完整 extract）
-                                    match_result = process.extractOne(
-                                        old_command_split[0], [mm], score_cutoff=typo_check_args_score * 100
-                                    )
-                                    if match_result:
-                                        Logger.debug(f"Match close args: {old_command_split[0]} -> {match_result[0]}")
-                                        new_command_split.append(mm)
-                                        del old_command_split[0]
-                                    else:
-                                        new_command_split.append(old_command_split[0])
-                                        del old_command_split[0]
-                            else:
-                                new_command_split.append(mm)
-                new_command_display = " ".join(new_command_split)
-                result = await _typo_confirm(
-                    msg, new_command_display, new_command_split[0], " ".join(new_command_split)
-                )
-                if result:
-                    return result
-            else:
-                if len_command_split - 1 == 1:
-                    new_command_display = f"{match_close_module[0]} {' '.join(command_split[1:])}"
-                    result = await _typo_confirm(
-                        msg,
-                        new_command_display,
-                        match_close_module[0],
-                        " ".join([match_close_module[0]] + command_split[1:]),
-                    )
-                    if result:
-                        return result
-        else:
-            new_trigger_msg = match_close_module[0] + (
-                " " + " ".join(command_split[1:]) if len(command_split) > 1 else ""
-            )
-            result = await _typo_confirm(msg, new_trigger_msg, match_close_module[0], new_trigger_msg)
-            if result:
-                return result
     return None, None, False
 
 
