@@ -38,7 +38,7 @@ async def marry(msg: Bot.MessageSession, change: bool, is_husband: bool = False)
     now = None
     if db and db.timestamp.date == datetime.date:
         if not change:
-            now = db.wife_name if is_husband else db.husband_name
+            now = db.husband_name if is_husband else db.wife_name
     if now:
         await msg.finish(
             [
