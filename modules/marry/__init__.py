@@ -32,7 +32,7 @@ husband_names = os.listdir(assets / "husband")
 async def marry(msg: Bot.MessageSession, change: bool, is_husband: bool = False):
     _id = msg.session_info.sender_id
     names = husband_names if is_husband else wife_names
-    chose = random.sample(names, 1)[0]
+    chosen = random.sample(names, 1)[0]
     db = (await TodayHusbandInfo.get_or_none(sender_id=_id)) \
      if is_husband else (await TodayWifeInfo.get_or_none(sender_id=_id))
     now = None
@@ -40,20 +40,22 @@ async def marry(msg: Bot.MessageSession, change: bool, is_husband: bool = False)
         if not change:
             now = db.husband_name if is_husband else db.wife_name
     if now:
+        now_files = os.listdir(assets / ("husband" if is_husband else "wife") / now)
         await msg.finish(
             [
                 Plain(f"你今天的老{"公" if is_husband else "婆"}是"),
-                Plain(now.split(".")[0]),
-                Image(assets / ("husband" if is_husband else "wife") / now),
+                Plain(now),
+                Image(assets / ("husband" if is_husband else "wife") / now / random.sample(now_files, 1)[0]),
             ]
         )
-    _ = (await TodayWifeInfo.get_wife(sender_id=_id, name=chose)) \
-     if not is_husband else (await TodayHusbandInfo.get_husband(sender_id=_id, name=chose))
+    _ = (await TodayWifeInfo.get_wife(sender_id=_id, name=chosen)) \
+     if not is_husband else (await TodayHusbandInfo.get_husband(sender_id=_id, name=chosen))
+    chosen_files = os.listdir(assets / ("husband" if is_husband else "wife") / chosen)
     await msg.finish(
         [
             Plain(f"成功！你今天的老{"公" if is_husband else "婆"}是"),
-            Plain(chose.split(".")[0]),
-            Image(assets / ("husband" if is_husband else "wife") / chose),
+            Plain(chosen),
+            Image(assets / ("husband" if is_husband else "wife") / chose / random.sample(chosen_files, 1)[0]),
         ]
     )
 
