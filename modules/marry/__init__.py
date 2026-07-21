@@ -1,5 +1,5 @@
 import os
-import random
+from random import choice
 from datetime import datetime
 
 from core.builtins.bot import Bot
@@ -32,7 +32,7 @@ husband_names = os.listdir(assets / "husband")
 async def marry(msg: Bot.MessageSession, change: bool, is_husband: bool = False):
     _id = msg.session_info.sender_id
     names = husband_names if is_husband else wife_names
-    chosen = random.sample(names, 1)[0]
+    chosen = choice(names)
     db = (await TodayHusbandInfo.get_or_none(sender_id=_id)) \
      if is_husband else (await TodayWifeInfo.get_or_none(sender_id=_id))
     now = None
@@ -45,7 +45,7 @@ async def marry(msg: Bot.MessageSession, change: bool, is_husband: bool = False)
             [
                 Plain(f"你今天的老{"公" if is_husband else "婆"}是"),
                 Plain(now),
-                Image(assets / ("husband" if is_husband else "wife") / now / random.sample(now_files, 1)[0]),
+                Image(assets / ("husband" if is_husband else "wife") / now / choice(now_files)),
             ]
         )
     _ = (await TodayWifeInfo.get_wife(sender_id=_id, name=chosen)) \
@@ -55,7 +55,7 @@ async def marry(msg: Bot.MessageSession, change: bool, is_husband: bool = False)
         [
             Plain(f"成功！你今天的老{"公" if is_husband else "婆"}是"),
             Plain(chosen),
-            Image(assets / ("husband" if is_husband else "wife") / chosen / random.sample(chosen_files, 1)[0]),
+            Image(assets / ("husband" if is_husband else "wife") / chosen / choice(chosen_files)),
         ]
     )
 
