@@ -42,3 +42,5 @@ generated_docs/*
 .mimocode/*
 .claude/*
 .claude/skills/akaribot-dev/SKILL.md
+/.kilo
+/docs
