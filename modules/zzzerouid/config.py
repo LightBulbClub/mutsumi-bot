@@ -1,17 +1,7 @@
-from core.component import module
-from core.config import Config
-
-zzz = module(
-    "zzz",
-    alias="zenless",
-    developers=["SoftGreyMon", "haoye_qwq"],
-    support_languages=["zh_cn", "en_us"],
-    desc="{I18N:zzzerouid.help.desc}",
-    doc=True,
-)
+from core.config.decorator import on_module_config
 
 
-@zzz.config()
+@on_module_config("zzz")
 class ZzzConfig:
     sched_energy_push: bool = True
     widget_resin: bool = True
@@ -22,6 +12,3 @@ class ZzzConfig:
     enable_custom_char_bg: bool = False
     refresh_data_list: list[str] = ["ENKA", "MINIGG", "MYS"]
 
-
-DEFAULT_CDN = "https://file.minigg.cn/sayu-bot/ZZZeroUID"
-RESOURCE_CDN = Config("resource_cdn", DEFAULT_CDN, table_name="module_zzzerouid")

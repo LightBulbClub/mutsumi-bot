@@ -11,26 +11,26 @@
 包含了复杂的权限检查、速率限制、错误报告等功能。
 """
 
-import asyncio
 import copy
 import functools
+import hashlib
 import inspect
 import re
 import time
 import traceback
 from string import Template as stringTemplate
-from typing import TYPE_CHECKING
+from types import UnionType
+from typing import TYPE_CHECKING, Union, get_args, get_origin
 
 from rapidfuzz import process
 
 from core.builtins.message.chain import MessageChain, match_kecode
-from core.builtins.message.internal import Plain, I18NContext
+from core.builtins.message.internal import ActionText, Plain, I18NContext
 from core.builtins.parser.args import ArgumentPattern, Template as argsTemplate, templates_to_str
 from core.builtins.parser.command import CommandParser
 from core.builtins.session.lock import ExecutionLockList
 from core.builtins.session.tasks import SessionTaskManager
-from core.config import Config
-from core.constants.default import bug_report_url_default, ignored_sender_default
+from core.config.base import CoreConfig
 from core.constants.exceptions import (
     AbuseWarning,
     ExternalException,
@@ -42,10 +42,16 @@ from core.constants.exceptions import (
     WaitCancelException,
 )
 from core.constants.info import Info
-from core.database.models import AnalyticsData
+from core.database.models import AnalyticsData, SenderUnionInfo, TargetUnionBind
 from core.exports import exports
 from core.loader import ModulesManager
 from core.logger import Logger
+from core.retired import (
+    is_module_allowed_when_retired,
+    is_retired_client,
+    is_yielding_retired_session,
+    should_yield_channel,
+)
 from core.tos import TOS_TEMPBAN_TIME, temp_ban_counter, abuse_warn_target, remove_temp_ban
 from core.types import Module, Param
 from core.types.module.component_meta import CommandMeta
@@ -57,50 +63,47 @@ if TYPE_CHECKING:
 
 # ========== 全局配置项 ==========
 
-# 忽略的发送者列表 - 这些用户的消息不会被处理
-ignored_sender = Config("ignored_sender", ignored_sender_default)
+# 忽略的用户列表 - 这些用户的消息不会被处理
+ignored_sender = CoreConfig.ignored_sender
 
 # ========== 功能开关 ==========
 
 # 是否启用服务条款检查（检查用户是否同意 ToS）
-enable_tos = Config("enable_tos", True)
+enable_tos = CoreConfig.enable_tos
 
 # 是否启用分析统计（记录命令执行情况）
-enable_analytics = Config("enable_analytics", True)
+enable_analytics = CoreConfig.enable_analytics
 
-# 错误报告的目标列表（将错误信息发送给这些用户）
-report_targets = Config("report_targets", [])
-
-# 是否启用模块无效提示（用户输入错误的模块名时是否提示）
-enable_module_invalid_prompt = Config("enable_module_invalid_prompt", False)
+# 错误报告的场景列表（将错误信息发送给这些场景）
+report_targets = CoreConfig.report_targets
 
 # Bug 报告的 URL
-bug_report_url = Config("bug_report_url", bug_report_url_default)
+bug_report_url = CoreConfig.bug_report_url
 
 # ========== 错字检查的分数阈值 ==========
 # 这些阈值用于模糊匹配（当用户输入可能有错字时）
 
 # 模块名的相似度阈值
-typo_check_module_score = Config("typo_check_module_score", 0.6)
+typo_check_module_score = CoreConfig.typo_check_module_score
 
 # 命令名的相似度阈值
-typo_check_command_score = Config("typo_check_command_score", 0.3)
+typo_check_command_score = CoreConfig.typo_check_command_score
 
 # 参数的相似度阈值
-typo_check_args_score = Config("typo_check_args_score", 0.5)
+typo_check_args_score = CoreConfig.typo_check_args_score
 
 # 选项的相似度阈值
-typo_check_options_score = Config("typo_check_options_score", 0.3)
+typo_check_options_score = CoreConfig.typo_check_options_score
 
 # 命令参数数量差异阈值：当用户输入的参数数量与匹配到的模板参数数量差异比例超过此值时，
 # 跳过命令模板匹配（避免字数差异过大时的错误推荐）
 # 例如：用户输入10个参数但模板只有2个参数 → 2/10=0.2 < 0.5 → 跳过匹配
-typo_check_args_diff_ratio = Config("typo_check_args_diff_ratio", 0.5)
+typo_check_args_diff_ratio = CoreConfig.typo_check_args_diff_ratio
 
 # 模块名字符长度差异阈值：当匹配到的模块名长度与用户输入长度差异比例超过此值时，
 # 跳过模块名匹配（避免如 ~p → ~decrypt 的错误推荐）
 # 例如：输入"p"(1字符) 匹配到 "decrypt"(7字符) → 1/7≈0.14 < 0.5 → 跳过匹配
-typo_check_module_diff_ratio = Config("typo_check_module_diff_ratio", 0.5)
+typo_check_module_diff_ratio = CoreConfig.typo_check_module_diff_ratio
 
 # ========== 频率限制相关 ==========
 
@@ -118,59 +121,16 @@ target_cooldown_counter = ExpiringTempDict()
 # 匹配哈希缓存 - 缓存消息与模块的匹配结果，加速处理
 match_hash_cache = ExpiringTempDict()
 
+# 同一条消息在不同平台被接收的时间差上限（秒）
+# 跨平台的消息 ID 无法互通，只能依据「内容一致且接收时间相近」判定是否为同一条消息
+CHANNEL_DEDUP_WINDOW = 10
 
-session_msg_cache = {}
+# 消息通道认领记录 - 键为 union|通道号|文本哈希，由最先写入的场景负责执行
+channel_claim_cache = ExpiringTempDict()
 
-
-def _should_ignore_message(msg: "Bot.MessageSession") -> bool:
-    """检查消息是否应当被忽略（忽略列表、空消息、其他 bot 消息）。"""
-    if msg.session_info.sender_id in ignored_sender:
-        return True
-    if len(msg.trigger_msg) == 0:
-        return True
-
-    bots_id = msg.session_info.target_info.target_data.get("bots_id", [])
-    if msg.session_info.sender_id in bots_id:
-        Logger.debug("Ignored message from other clients: " + msg.trigger_msg)
-        return True
-
-    return False
-
-
-def _is_sender_blocked(msg: "Bot.MessageSession") -> bool:
-    """检查发送者是否被屏蔽。"""
-    if msg.session_info.sender_info.blocked and not (
-        msg.session_info.sender_info.trusted or msg.session_info.sender_info.superuser
-    ):
-        return True
-    if msg.session_info.sender_id in msg.session_info.banned_users and not msg.session_info.superuser:
-        return True
-    return False
-
-
-async def _check_required_privilege(msg: "Bot.MessageSession", obj, bot: "Bot") -> str | None:
-    """
-    检查对象所需的权限是否满足。
-
-    :param msg: 消息会话对象
-    :param obj: 需要检查权限的对象（模块、命令或正则函数）
-    :param bot: Bot 实例
-    :return: 未满足的权限级别（"base_superuser" / "superuser" / "admin"），
-             若权限满足则返回 None
-    """
-    if obj.required_base_superuser:
-        if msg.session_info.sender_id not in bot.base_superuser_list:
-            return "base_superuser"
-        return None
-    if obj.required_superuser:
-        if not msg.check_super_user():
-            return "superuser"
-        return None
-    if obj.required_admin:
-        if not await msg.check_permission():
-            return "admin"
-        return None
-    return None
+# 标记为单次触发的正则，其「模块名 + 正则序号 + 场景 ID」在此登记，登记后不再参与匹配。
+# 仅存于进程内存，重启即清空；条目数上限为「触发过的场景数 × 单次触发正则条数」，有界。
+regex_once_cache: set[tuple[str, int, str]] = set()
 
 
 async def parser(msg: "Bot.MessageSession"):
@@ -185,7 +145,7 @@ async def parser(msg: "Bot.MessageSession"):
     5. 错误处理和用户反馈
 
     工作流程：
-    1. 刷新用户和目标信息（从数据库）
+    1. 刷新用户和场景信息（从数据库）
     2. 检查黑名单和权限
     3. 提取消息前缀，判断是否为命令
     4. 若是命令，进行命令解析和执行
@@ -200,13 +160,22 @@ async def parser(msg: "Bot.MessageSession"):
     # 创建标识字符串用于日志记录
     identify_str = f"[{msg.session_info.sender_id} ({msg.session_info.target_id})]"
 
+    # 检查用户是否在忽略列表中
     if msg.session_info.sender_id in ignored_sender:
         return
 
     try:
-        # ========== 步骤 1: 检查任务队列并初始化 ==========
+        # ========== 步骤 1: 检查任务队列 ==========
         # 检查是否有等待此消息的任务（如等待用户回复）
-        await SessionTaskManager.check(msg)
+        # 等待任务按消息通道建键，同通道内的场景共享。退役场景若在此抢先命中，存活场景挂起的
+        # 等待便由它的消息触发，模块拿到的结果也随之出自退役平台。故此处须与通道认领同判据，
+        # 且早于任务检查：认领只拦命令与正则两条路径，拦不到等待。
+        if not await is_yielding_retired_session(
+            msg.session_info.target_id,
+            msg.session_info.target_union_id,
+            msg.session_info.target_channel_id,
+        ):
+            await SessionTaskManager.check(msg)
 
         # 获取该平台和客户端的所有可用模块
         modules = ModulesManager.return_modules_list(msg.session_info.target_from, msg.session_info.client_name)
@@ -214,11 +183,24 @@ async def parser(msg: "Bot.MessageSession"):
         # 将消息转换为易读的显示格式
         msg.trigger_msg = normalize_space(msg.as_display())
 
-        if _should_ignore_message(msg):
+        # 如果消息为空，直接返回
+        if len(msg.trigger_msg) == 0:
+            return
+
+        # 屏蔽同一个现实场景里其它机器人发的消息，避免把对方的输出当成用户输入去执行
+        if msg.session_info.sender_id in msg.session_info.target_union_info.list_peer_bots(msg.session_info.target_id):
+            Logger.debug("Ignored message from other clients: " + msg.trigger_msg)
             return
 
         # ========== 步骤 2: 权限检查 ==========
-        if _is_sender_blocked(msg):
+        # 检查用户是否被被机器人屏蔽（机器人黑名单）
+        if msg.session_info.sender_union_info.blocked and not (
+            msg.session_info.sender_union_info.trusted or msg.session_info.sender_union_info.superuser
+        ):
+            return
+
+        # 检查用户是否在场景的屏蔽用户列表中（场景黑名单，按 union 记录，换绑同一 union 的其他账号同样受限）
+        if msg.session_info.sender_union_id in msg.session_info.banned_users and not msg.session_info.superuser:
             return
 
         # ========== 步骤 3: 命令匹配 ==========
@@ -230,18 +212,25 @@ async def parser(msg: "Bot.MessageSession"):
 
             command_first_word = await _process_command(msg, modules, disable_prefix, in_prefix_list)
 
-            # 执行前检查是否为重复会话，_process_command 会去掉 trigger_msg 的前缀
-            if await _check_duplicate_msg(msg):
+            # 退役客户端仅保留白名单模块。此处须早于通道认领：若退役场景先认领再因退役不执行，
+            # 同通道的其他场景会因避让而放弃处理，该场景内将无人响应。
+            if (
+                is_retired_client(msg.session_info.client_name)
+                and not is_module_allowed_when_retired(command_first_word)
+                # and not msg.check_super_user()
+            ):
+                return
+
+            # 执行前先认领消息通道，同通道内已有场景认领则避让，_process_command 会去掉 trigger_msg 的前缀
+            if await _claim_channel_message(msg):
                 return
 
             if command_first_word:
-                if not ExecutionLockList.check(msg):  # 加锁
-                    ExecutionLockList.add(msg)
-                else:
+                if not try_acquire_execution_lock(msg):
                     await msg.send_message(I18NContext("parser.command.running.prompt"))
                     return
 
-            if msg.session_info.muted and command_first_word != "mute":  # 检查机器人在会话中是否被禁言
+            if msg.session_info.muted and command_first_word != "mute":  # 检查机器人在场景中是否被禁言
                 return
 
             if command_first_word in modules:  # 检查触发命令是否在模块列表中
@@ -249,20 +238,28 @@ async def parser(msg: "Bot.MessageSession"):
                     await _execute_module(msg, modules, command_first_word, identify_str)
                 else:
                     await msg.send_message(I18NContext("parser.module.unloaded", module=command_first_word))
-            elif msg.session_info.sender_info.sender_data.get("typo_check", True):
+            elif msg.session_info.sender_union_info.sender_data.get("typo_check", True):
                 new_msg, new_command_first_word, confirmed = await _command_typo_check(msg, modules, command_first_word)
                 if new_msg:
                     if modules[new_command_first_word]._db_load:  # 检查模块是否已加载
                         await _execute_module(new_msg, modules, new_command_first_word, identify_str)
                     else:
                         await msg.send_message(I18NContext("parser.module.unloaded", module=new_command_first_word))
-                elif enable_module_invalid_prompt and not confirmed:
+                elif not confirmed and msg.session_info.invalid_module_prompt_enabled:
                     await msg.send_message(
-                        I18NContext("parser.command.invalid.module", prefix=msg.session_info.prefixes[0])
+                        I18NContext(
+                            "parser.command.invalid.module",
+                            prefix=msg.session_info.prefixes[0],
+                            cmd=ActionText(f"{msg.session_info.prefixes[0]}help"),
+                        )
                     )
-            elif enable_module_invalid_prompt:
+            elif msg.session_info.invalid_module_prompt_enabled:
                 await msg.send_message(
-                    I18NContext("parser.command.invalid.module", prefix=msg.session_info.prefixes[0])
+                    I18NContext(
+                        "parser.command.invalid.module",
+                        prefix=msg.session_info.prefixes[0],
+                        cmd=ActionText(f"{msg.session_info.prefixes[0]}help"),
+                    )
                 )
 
             return msg
@@ -288,26 +285,53 @@ async def parser(msg: "Bot.MessageSession"):
         Info.message_parsed += 1
 
 
-async def _check_duplicate_msg(msg: "Bot.MessageSession", display=None):
-    # 获取已连接的会话列表（用于会话内存在多个由本进程启动的bot避让用）
-    if not display:
+async def _claim_channel_message(msg: "Bot.MessageSession", display: str | None = None) -> bool:
+    """
+    认领一条消息，并判断它是否已被同一消息通道内的另一个场景处理。
+
+    跨平台的消息 ID 无法互通，判定「同一条消息」只能依据来源、内容与时间：出自通道内的另一个场景，
+    纯文本一致，且两次接收的时间相差不超过 :data:`CHANNEL_DEDUP_WINDOW` 秒。
+
+    :param msg: 消息会话。
+    :param display: 参与判定的文本，留空则取命令文本。
+    :return: True 表示已被其它场景认领，当前场景应当避让。
+    """
+    union_id = msg.session_info.target_union_id
+    if not union_id:
+        return False
+    channel_id = msg.session_info.target_channel_id
+
+    channels = await TargetUnionBind.list_channels(union_id)
+    # 通道内仅有自身时不存在重复执行的可能，绝大多数场景经由此快路径返回。
+    if sum(1 for cid in channels.values() if cid == channel_id) <= 1:
+        return False
+
+    # 退役场景不执行白名单之外的命令，由它认领会导致同通道的其他场景避让而无人响应。
+    if should_yield_channel(msg.session_info.target_id, channels, channel_id):
+        Logger.debug(f"Retired context {msg.session_info.target_id} yielded the channel.")
+        return True
+
+    if display is None:
         display = msg.trigger_msg
-    connected_session = msg.session_info.target_info.target_data.get("connected_session", [])
-    if connected_session:
-        for c in connected_session:
-            if session_msg_cache.get(f"{display}_{c}"):
-                Logger.debug("Ignored duplicate session message from other client: " + display)
-                return True  # 收到了重复的消息，进行避让处理
+    token = f"{union_id}|{channel_id}|{hashlib.sha256(display.encode('utf-8')).hexdigest()}"
+    now = time.time()
 
-        msg_token = f"{display}_{msg.session_info.target_id}"
-        session_msg_cache.update({msg_token: True})
+    # 以下查表与写入之间不得出现 await：在单线程事件循环下该段方为原子操作，认领才不会被并发打断。
+    claimed = channel_claim_cache.get(token)
+    claimed_at = claimed.get("timestamp") if claimed else None
+    claimed_by = claimed.get("target_id") if claimed else None
+    # 认领方须与自身不同方可判定为重复。认领键只由通道与内容组成，不含发起方，
+    # 若不加这一判据，用户在时间窗内重复发送同样的内容会撞上自己上一条留下的认领，该条消息将无人响应。
+    # 此情形照常落至下方改写认领记录，同通道的其它场景因而仍按最新一次到达的时间避让。
+    if claimed_at and claimed_by != msg.session_info.target_id and abs(now - claimed_at) <= CHANNEL_DEDUP_WINDOW:
+        Logger.debug(f"Ignored duplicate message claimed by {claimed_by}: {display}")
+        return True
 
-        async def _remove_cache(m):
-            await asyncio.sleep(30)
-            if m in session_msg_cache:
-                del session_msg_cache[m]
-
-        asyncio.create_task(_remove_cache(msg_token))
+    channel_claim_cache[token] = ExpiringTempDict(
+        exp=CHANNEL_DEDUP_WINDOW * 3,
+        data={"timestamp": now, "target_id": msg.session_info.target_id},
+        root=False,
+    )
     return False
 
 
@@ -325,8 +349,8 @@ def _transform_alias(msg, command: str):
     :param command: 原始命令字符串
     :return: 转换后的命令字符串（如果没有匹配的别名，返回原命令）
     """
-    # 从目标信息中获取自定义别名字典
-    aliases = dict(msg.session_info.target_info.target_data.get("command_alias", {}).items())
+    # 从场景信息中获取自定义别名字典
+    aliases = dict(msg.session_info.target_union_info.target_data.get("command_alias", {}).items())
 
     # 存储所有匹配的别名模板，格式: (占位符数量, 模式, 替换, 占位符列表, 匹配对象)
     matched_aliases = []
@@ -402,7 +426,7 @@ def _get_prefixes(msg: "Bot.MessageSession"):
              - in_prefix_list: 消息是否以某个前缀开头
     """
     # ========== 步骤 1: 处理自定义别名 ==========
-    if msg.session_info.target_info.target_data.get("command_alias"):
+    if msg.session_info.target_union_info.target_data.get("command_alias"):
         # 将自定义别名替换为实际命令
         msg.trigger_msg = _transform_alias(msg, msg.trigger_msg)
 
@@ -516,6 +540,28 @@ async def _process_command(msg: "Bot.MessageSession", modules, disable_prefix, i
     return first_word
 
 
+async def _check_superuser_or_authorized(msg: "Bot.MessageSession", module_name: str) -> bool:
+    """
+    检查用户是否有使用该模块的权限，支持模块授权。
+
+    先检查是否为超级用户，若不是则检查 sender_data 中的 module_auth 授权列表。
+    授权需同时验证授权者仍为超级用户。
+
+    :param msg: 消息会话对象
+    :param module_name: 模块名称
+    :return: 如果用户有权限返回 True
+    """
+    if msg.check_super_user():
+        return True
+    auth_list = msg.session_info.sender_union_info.sender_data.get("module_auth", [])
+    for entry in auth_list:
+        if entry.get("module") == module_name:
+            authorizer = await SenderUnionInfo.get_by_sender_id(entry["authorized_by"], create=False)
+            if authorizer and authorizer.superuser:
+                return True
+    return False
+
+
 async def _execute_module(msg: "Bot.MessageSession", modules, command_first_word, identify_str):
     """
     执行模块的命令处理逻辑。
@@ -543,7 +589,7 @@ async def _execute_module(msg: "Bot.MessageSession", modules, command_first_word
     _typing = False  # 标记是否正在显示“正在输入……”状态
     try:
         # ========== 步骤 1: 冷却检查 ==========
-        # 检查目标是否在冷却期内（被临时禁止）
+        # 检查场景是否在冷却期内（被临时禁止）
         await _check_target_cooldown(msg)
 
         # ========== 步骤 2: ToS 临时封禁检查 ==========
@@ -554,8 +600,8 @@ async def _execute_module(msg: "Bot.MessageSession", modules, command_first_word
         module: Module = modules[command_first_word]
         if not module.command_list.set:
             # 模块没有可用的命令，展示模块简介
-            if module.rss and not msg.session_info.support_rss:
-                # RSS 模块但平台不支持，直接返回
+            if module.unsupported_reason(msg.session_info):
+                # 模块受平台能力或权限所限，不展示简介
                 return
             if module.desc:
                 # 发送模块描述
@@ -567,6 +613,7 @@ async def _execute_module(msg: "Bot.MessageSession", modules, command_first_word
                             "parser.module.disabled.prompt",
                             module=command_first_word,
                             prefix=msg.session_info.prefixes[0],
+                            cmd=ActionText(f"{msg.session_info.prefixes[0]}enable {command_first_word}"),
                         )
                     )
                 await msg.send_message(desc)
@@ -583,7 +630,7 @@ async def _execute_module(msg: "Bot.MessageSession", modules, command_first_word
                 return
         elif module.required_superuser:
             # 需要超级用户权限
-            if not msg.check_super_user():
+            if not await _check_superuser_or_authorized(msg, command_first_word):
                 await msg.send_message(I18NContext("parser.superuser.permission.denied"))
                 return
         elif not module.base:
@@ -597,11 +644,12 @@ async def _execute_module(msg: "Bot.MessageSession", modules, command_first_word
                             "parser.module.disabled.prompt",
                             module=command_first_word,
                             prefix=msg.session_info.prefixes[0],
+                            cmd=ActionText(f"{msg.session_info.prefixes[0]}enable {command_first_word}"),
                         )
                     )
                     if await msg.wait_confirm(I18NContext("parser.module.disabled.to_enable"), no_confirm_action=False):
                         # 用户确认启用
-                        await msg.session_info.target_info.config_module(command_first_word)
+                        await msg.session_info.target_union_info.config_module(command_first_word)
                         await msg.send_message(
                             I18NContext("core.message.module.enable.success", module=command_first_word)
                         )
@@ -643,7 +691,7 @@ async def _execute_module(msg: "Bot.MessageSession", modules, command_first_word
         for func in module.command_list.set:
             if not func.command_template:
                 # 显示“正在输入……”状态（如果用户启用）
-                if msg.session_info.sender_info.sender_data.get("typing_prompt", True):
+                if msg.session_info.typing_prompt_enabled:
                     await msg.start_typing()
                     _typing = True
                 # 执行模块函数
@@ -651,7 +699,7 @@ async def _execute_module(msg: "Bot.MessageSession", modules, command_first_word
                 raise SessionFinished(msg.sent)
 
         # ========== 步骤 8: 错字检查 ==========
-        if msg.session_info.sender_info.sender_data.get("typo_check", True):
+        if msg.session_info.sender_union_info.sender_data.get("typo_check", True):
             # 用户启用了错字检查，尝试纠正命令
             new_msg, new_command_first_word, confirmed = await _command_typo_check(msg, modules, command_first_word)
             if new_msg:
@@ -664,7 +712,10 @@ async def _execute_module(msg: "Bot.MessageSession", modules, command_first_word
                 # 没有找到匹配的命令，提示语法错误
                 await msg.send_message(
                     I18NContext(
-                        "parser.command.invalid.syntax", module=command_first_word, prefix=msg.session_info.prefixes[0]
+                        "parser.command.invalid.syntax",
+                        module=command_first_word,
+                        prefix=msg.session_info.prefixes[0],
+                        cmd=ActionText(f"{msg.session_info.prefixes[0]}help {command_first_word}"),
                     )
                 )
     except SendMessageFailed:
@@ -685,6 +736,8 @@ async def _execute_module(msg: "Bot.MessageSession", modules, command_first_word
             await AnalyticsData.create(
                 target_id=msg.session_info.target_id,
                 sender_id=msg.session_info.sender_id,
+                target_union_id=msg.session_info.target_union_id,
+                sender_union_id=msg.session_info.sender_union_id,
                 command=msg.trigger_msg,
                 module_name=command_first_word,
                 module_type="normal",
@@ -719,6 +772,108 @@ async def _execute_module(msg: "Bot.MessageSession", modules, command_first_word
         ExecutionLockList.remove(msg)
 
 
+def regex_once_triggered(module_name: str, index: int, target_id: str) -> bool:
+    """
+    判断一条标记为单次触发的正则是否已在该场景中跑过。
+
+    :param module_name: 所属模块名称。
+    :param index: 该正则在模块 ``regex_list`` 中的序号。
+    :param target_id: 场景 ID。
+    :return: 是否已触发过。
+    """
+    return (module_name, index, target_id) in regex_once_cache
+
+
+def mark_regex_once(module_name: str, index: int, target_id: str) -> None:
+    """
+    登记一条单次触发的正则已在该场景中跑过。
+
+    :param module_name: 所属模块名称。
+    :param index: 该正则在模块 ``regex_list`` 中的序号。
+    :param target_id: 场景 ID。
+    """
+    regex_once_cache.add((module_name, index, target_id))
+
+
+def regex_module_enabled(
+    module: "Module", module_name: str, enabled_modules: list | None, read_all_messages: bool = True
+) -> bool:
+    """
+    判断一个模块的正则处理函数是否应当参与匹配。
+
+    base 模块无须在场景中启用即可生效，与命令路径 :func:`_execute_module` 的判定保持一致。
+    此前该豁免仅存在于命令路径，导致 base 模块注册的正则永远不会触发。
+
+    权限判定置于启用判定之前：模块可能在权限开启期间被启用，其后权限又被关闭，此时
+    ``enabled_modules`` 中仍留有该模块，只拦截启用入口并不足够。
+
+    :param module: 待判定的模块。
+    :param module_name: 模块名称。
+    :param enabled_modules: 当前场景已启用的模块列表。
+    :param read_all_messages: 机器人在该场景是否有权限读取全部消息。
+    :return: 是否参与匹配。
+    """
+    if module.base:
+        return True
+    if module.regex and not read_all_messages:
+        return False
+    return bool(enabled_modules) and module_name in enabled_modules
+
+
+def try_acquire_execution_lock(msg: "Bot.MessageSession") -> bool:
+    """
+    尝试为当前会话获取执行锁。
+
+    获取失败表示该会话已有命令在执行。指令路径应就此告知用户，正则路径则应静默跳过：
+    正则由消息内容隐式触发，用户并未主动请求，提示对其纯属噪音。
+
+    :param msg: 消息会话。
+    :return: 是否成功获取。
+    """
+    if ExecutionLockList.check(msg):
+        return False
+    ExecutionLockList.add(msg)
+    return True
+
+
+def regex_func_available(rfunc, target_from: str, client_name: str) -> bool:
+    """
+    判断一条正则处理函数在当前平台上是否可用。
+
+    判据与 :meth:`RegexMatches.get` 一致。此前 :func:`_execute_regex` 直接遍历 ``regex_list.set``，
+    只校验模块级的 ``available_for``，正则级的平台声明因而从未生效——注册时写下的
+    ``@module.regex(available_for=...)`` 形同虚设。
+
+    :param rfunc: 正则处理函数的元数据。
+    :param target_from: 当前场景的前缀。
+    :param client_name: 当前客户端名称。
+    :return: 是否可用。
+    """
+    if not rfunc.load:
+        return False
+    if target_from in rfunc.exclude_from or client_name in rfunc.exclude_from:
+        return False
+    return "*" in rfunc.available_for or target_from in rfunc.available_for or client_name in rfunc.available_for
+
+
+async def regex_func_permitted(msg: "Bot.MessageSession", rfunc, module_name: str) -> bool:
+    """
+    判断一条正则处理函数在当前会话中是否有权执行。
+
+    该判定与消息内容无关，须在执行正则匹配之前完成，避免为无权使用的处理函数白付匹配开销。
+
+    :param msg: 消息会话。
+    :param rfunc: 正则处理函数的元数据。
+    :param module_name: 所属模块名称。
+    :return: 是否有权执行。
+    """
+    if rfunc.required_superuser:
+        return await _check_superuser_or_authorized(msg, module_name)
+    if rfunc.required_admin:
+        return await msg.check_permission()
+    return True
+
+
 async def _execute_regex(msg: "Bot.MessageSession", modules, identify_str):
     """
     执行正则表达式匹配的模块。
@@ -740,20 +895,49 @@ async def _execute_regex(msg: "Bot.MessageSession", modules, identify_str):
     """
     bot: "Bot" = exports["Bot"]
 
+    # 同一条消息会被所有模块的正则轮流匹配，而渲染结果只由这两个参数决定，
+    # 按参数缓存一次，避免每条正则都把消息链重新走一遍
+    display_cache: dict[tuple[bool, tuple], str] = {}
+
+    def get_trigger_msg(text_only: bool, element_filter) -> str:
+        cache_key = (text_only, tuple(element_filter or ()))
+        if cache_key not in display_cache:
+            display_cache[cache_key] = msg.as_display(text_only=text_only, element_filter=element_filter)
+        return display_cache[cache_key]
+
     # ========== 遍历所有模块 ==========
     for m in modules:
         # 跳过未加载的模块
         if not modules[m]._db_load:
             continue
 
+        # 退役客户端仅保留白名单模块，其余模块的正则一律不参与匹配。
+        if is_retired_client(msg.session_info.client_name) and not is_module_allowed_when_retired(m):
+            continue
+
         try:
             # ========== 步骤 1: 检查模块是否已启用且有正则表达式 ==========
-            if m in msg.session_info.enabled_modules and modules[m].regex_list.set:
+            if (
+                regex_module_enabled(
+                    modules[m], m, msg.session_info.enabled_modules, msg.session_info.read_all_messages
+                )
+                and modules[m].regex_list.set
+            ):
                 regex_module: Module = modules[m]
 
                 # ========== 步骤 2: 权限检查 ==========
-                if await _check_required_privilege(msg, regex_module, bot):
-                    continue
+                if regex_module.required_base_superuser:
+                    # 需要基础超级用户权限
+                    if msg.session_info.sender_id not in bot.base_superuser_list:
+                        continue
+                elif regex_module.required_superuser:
+                    # 需要超级用户权限
+                    if not await _check_superuser_or_authorized(msg, m):
+                        continue
+                elif regex_module.required_admin:
+                    # 需要管理员权限
+                    if not await msg.check_permission():
+                        continue
 
                 # ========== 步骤 3: 检查模块可用性和平台限制 ==========
                 if (
@@ -769,7 +953,21 @@ async def _execute_regex(msg: "Bot.MessageSession", modules, identify_str):
                     continue
 
                 # ========== 步骤 4: 遍历模块的所有正则表达式 ==========
-                for rfunc in regex_module.regex_list.set:
+                for index, rfunc in enumerate(regex_module.regex_list.set):
+                    # 正则级的平台声明，与命令级的 available_for / exclude_from 对称。
+                    # 步骤 3 校验的是模块级声明，两者互不覆盖。
+                    if not regex_func_available(rfunc, msg.session_info.target_from, msg.session_info.client_name):
+                        continue
+
+                    # 单次触发的正则在该场景跑过之后不再参与匹配，避免每条消息都付出
+                    # 通道认领的数据库查询与统计插入。
+                    if rfunc.trigger_once_startup and regex_once_triggered(m, index, msg.session_info.target_id):
+                        continue
+
+                    # 权限与消息内容无关，先筛选后匹配，避免为无权使用的处理函数白付正则开销。
+                    if not await regex_func_permitted(msg, rfunc, m):
+                        continue
+
                     time_start = time.perf_counter()
                     matched = False  # 标记是否匹配成功
                     _typing = False  # 标记是否显示“正在输入……”
@@ -777,18 +975,19 @@ async def _execute_regex(msg: "Bot.MessageSession", modules, identify_str):
                         matched_hash = 0  # 用于检测重复匹配
 
                         # 获取要匹配的消息文本（可能只包含纯文本或过滤特定元素）
-                        trigger_msg = msg.as_display(text_only=rfunc.text_only, element_filter=rfunc.element_filter)
+                        trigger_msg = get_trigger_msg(rfunc.text_only, rfunc.element_filter)
 
                         # ========== 步骤 5: 执行正则表达式匹配 ==========
-                        if rfunc.mode.upper() in ["M", "MATCH"]:
-                            # 使用 re.match（从字符串开头匹配）
-                            msg.matched_msg = re.match(rfunc.pattern, trigger_msg, flags=rfunc.flags)
+                        # mode 与模式均在注册期归一化/编译，此处直接用
+                        if rfunc.mode in ("M", "MATCH"):
+                            # 使用 match（从字符串开头匹配）
+                            msg.matched_msg = rfunc.compiled.match(trigger_msg)
                             if msg.matched_msg:
                                 matched = True
                                 matched_hash = hash(msg.matched_msg.groups())
-                        elif rfunc.mode.upper() in ["A", "FINDALL"]:
-                            # 使用 re.findall（查找所有匹配）
-                            msg.matched_msg = tuple(set(re.findall(rfunc.pattern, trigger_msg, flags=rfunc.flags)))
+                        elif rfunc.mode in ("A", "FINDALL"):
+                            # 使用 findall（查找所有匹配）
+                            msg.matched_msg = tuple(set(rfunc.compiled.findall(trigger_msg)))
                             if msg.matched_msg:
                                 matched = True
                                 matched_hash = hash(msg.matched_msg)
@@ -800,8 +999,8 @@ async def _execute_regex(msg: "Bot.MessageSession", modules, identify_str):
                                 Logger.info(f"{identify_str} -> [Bot]: {msg.trigger_msg}")
                             Logger.debug("Matched hash:" + str(matched_hash))
 
-                            # 执行前检查是否为重复会话
-                            if await _check_duplicate_msg(msg, str(matched_hash)):
+                            # 执行前先认领消息通道，同通道内已有场景认领则避让
+                            if await _claim_channel_message(msg, str(matched_hash)):
                                 continue
 
                             # ========== 循环匹配检测 ==========
@@ -821,14 +1020,6 @@ async def _execute_regex(msg: "Bot.MessageSession", modules, identify_str):
                             if rfunc.show_typing:
                                 await _check_target_cooldown(msg)
 
-                            # ========== 正则表达式级别的权限检查 ==========
-                            if rfunc.required_superuser:
-                                if not msg.check_super_user():
-                                    continue
-                            elif rfunc.required_admin:
-                                if not await msg.check_permission():
-                                    continue
-
                             # ========== ToS 消息计数 ==========
                             if not regex_module.base:
                                 if enable_tos and rfunc.show_typing:
@@ -838,14 +1029,18 @@ async def _execute_regex(msg: "Bot.MessageSession", modules, identify_str):
                                         "Tos is disabled, check the configuration if it is not work as expected."
                                     )
 
-                            if not ExecutionLockList.check(msg):
-                                ExecutionLockList.add(msg)
-                            else:
-                                return await msg.send_message(I18NContext("parser.command.running.prompt"))
+                            # 正则由消息内容隐式触发，锁被占用时静默跳过；
+                            # 此处若发出提示并 return，还会连带中断后续模块的正则遍历。
+                            if not try_acquire_execution_lock(msg):
+                                continue
 
-                            if rfunc.show_typing and msg.session_info.sender_info.sender_data.get(
-                                "typing_prompt", True
-                            ):
+                            # 标记须在调用处理函数之前落下：处理函数为协程，其执行期间同一场景的
+                            # 下条消息若到达，标记尚未设置便会重复触发。抛异常时同样保留标记——
+                            # 下游链路本就有问题，再次触发只是白费开销。
+                            if rfunc.trigger_once_startup:
+                                mark_regex_once(m, index, msg.session_info.target_id)
+
+                            if rfunc.show_typing and msg.session_info.typing_prompt_enabled:
                                 await msg.start_typing()
                                 _typing = True
                                 await rfunc.function(msg)  # 将msg传入下游模块
@@ -867,6 +1062,8 @@ async def _execute_regex(msg: "Bot.MessageSession", modules, identify_str):
                             await AnalyticsData.create(
                                 target_id=msg.session_info.target_id,
                                 sender_id=msg.session_info.sender_id,
+                                target_union_id=msg.session_info.target_union_id,
+                                sender_union_id=msg.session_info.sender_union_id,
                                 command=msg.trigger_msg,
                                 module_name=m,
                                 module_type="regex",
@@ -899,10 +1096,10 @@ async def _execute_regex(msg: "Bot.MessageSession", modules, identify_str):
 
 async def _check_target_cooldown(msg: "Bot.MessageSession"):
     """
-    检查目标是否在冷却期内。
+    检查场景是否在冷却期内。
 
     该函数实现了命令冷却机制，防止用户过于频繁地使用命令。
-    冷却时间可在目标配置中设置，管理员和超级用户不受限制。
+    冷却时间可在场景配置中设置，管理员和超级用户不受限制。
 
     工作流程：
     1. 获取冷却时间配置
@@ -913,17 +1110,17 @@ async def _check_target_cooldown(msg: "Bot.MessageSession"):
     :param msg: 消息会话对象
     :raises NoReportException: 如果用户在冷却期内
     """
-    # 获取目标配置的冷却时间（秒）
-    cooldown_time = int(msg.session_info.target_info.target_data.get("cooldown_time", 0))
+    # 获取场景配置的冷却时间（秒）
+    cooldown_time = int(msg.session_info.target_union_info.target_data.get("cooldown_time", 0))
 
     # 如果没有配置冷却时间或用户有管理权限，直接返回
     if not cooldown_time or await msg.check_permission():
         return
 
-    # 获取该目标的冷却记录
+    # 获取该场景的冷却记录
     target_record = target_cooldown_counter[msg.session_info.target_id]
 
-    # 获取该发送者的冷却记录
+    # 获取该用户的冷却记录
     sender_record = target_record.get(msg.session_info.sender_id)
 
     # 如果不存在，则创建并跳过冷却提示
@@ -1040,14 +1237,30 @@ def _get_cached_signature(func):
     return inspect.signature(func)
 
 
+def _unwrap_optional(annotation):
+    """取出 ``X | None`` 或 ``Optional[X]`` 中的实际类型。
+
+    可选参数标注为 ``int | None`` 时仍应按 ``int`` 做类型转换，
+    否则值会以原始字符串形式传入命令函数。
+
+    :param annotation: 参数的类型注解。
+    :return: 剥去 None 后的类型；非 Optional 标注则原样返回。
+    """
+    if get_origin(annotation) in (Union, UnionType):
+        args = [arg for arg in get_args(annotation) if arg is not type(None)]
+        if len(args) == 1:
+            return args[0]
+    return annotation
+
+
 async def _execute_module_command(msg: "Bot.MessageSession", module, command_first_word):
     """
     执行模块的命令解析和处理。
 
     该函数是带命令模板的模块的执行入口，负责：
     1. 使用 CommandParser 解析命令参数
-    2. 验证发送者权限（超级用户、管理员等）
-    3. 检查命令在当前会话中的有效性（平台限制等）
+    2. 验证用户权限（超级用户、管理员等）
+    3. 检查命令在当前场景中的有效性（平台限制等）
     4. 根据命令函数的参数签名构建调用参数
     5. 显示“正在输入……”状态（如果用户启用）
     6. 执行命令函数
@@ -1069,16 +1282,22 @@ async def _execute_module_command(msg: "Bot.MessageSession", module, command_fir
             msg.parsed_msg = parsed_msg[1]  # 使用命令模板解析后的消息
             Logger.trace("Parsed message: " + str(msg.parsed_msg))
 
-            # ========== 步骤 2: 验证发送者权限 ==========
-            denied_privilege = await _check_required_privilege(msg, command, bot)
-            if denied_privilege:
-                if denied_privilege == "admin":
-                    await msg.send_message(I18NContext("parser.admin.permission.denied.command"))
-                else:
-                    await msg.send_message(I18NContext("parser.superuser.permission.denied"))
-                return
+            # ========== 步骤 2: 验证用户权限 ==========
 
-            # ========== 步骤 3: 检查命令是否在会话内有效 ==========
+            if command.required_base_superuser:
+                if msg.session_info.sender_id not in bot.base_superuser_list:
+                    await msg.send_message(I18NContext("parser.superuser.permission.denied"))
+                    return
+            elif command.required_superuser:
+                if not await _check_superuser_or_authorized(msg, command_first_word):
+                    await msg.send_message(I18NContext("parser.superuser.permission.denied"))
+                    return
+            elif command.required_admin:
+                if not await msg.check_permission():
+                    await msg.send_message(I18NContext("parser.admin.permission.denied.command"))
+                    return
+
+            # ========== 步骤 3: 检查命令是否在场景内有效 ==========
 
             if (
                 not command.load
@@ -1132,12 +1351,13 @@ async def _execute_module_command(msg: "Bot.MessageSession", module, command_fir
                         # 参数在解析结果中
                         kwargs[param_name] = parsed_msg_[param_name_]
                         try:
-                            # 尝试根据类型注解进行类型转换
-                            if param_obj.annotation == int:
+                            # 尝试根据类型注解进行类型转换，可选参数按其非 None 类型处理
+                            annotation = _unwrap_optional(param_obj.annotation)
+                            if annotation == int:
                                 kwargs[param_name] = int(parsed_msg_[param_name_])
-                            elif param_obj.annotation == float:
+                            elif annotation == float:
                                 kwargs[param_name] = float(parsed_msg_[param_name_])
-                            elif param_obj.annotation == bool:
+                            elif annotation == bool:
                                 kwargs[param_name] = bool(parsed_msg_[param_name_])
                             del parsed_msg_[param_name_]
                         except (KeyError, ValueError):
@@ -1162,7 +1382,7 @@ async def _execute_module_command(msg: "Bot.MessageSession", module, command_fir
                 kwargs[func_params[list(func_params.keys())[0]].name] = msg
 
             # ========== 步骤 5: 显示“正在输入……”状态 ==========
-            if msg.session_info.target_info.target_data.get("typing_prompt", True):
+            if msg.session_info.typing_prompt_enabled:
                 await msg.start_typing()
                 _typing = True
 
@@ -1172,12 +1392,19 @@ async def _execute_module_command(msg: "Bot.MessageSession", module, command_fir
             # 如果函数没有使用 msg.finish，手动结束会话
             raise SessionFinished(msg.sent)
         except InvalidCommandFormatError:
-            if not msg.session_info.sender_info.sender_data.get("typo_check", True):
-                await msg.send_message(
-                    I18NContext(
-                        "parser.command.invalid.syntax", module=command_first_word, prefix=msg.session_info.prefixes[0]
-                    )
+            # if not msg.session_info.sender_union_info.sender_data.get("typo_check", True):
+            # TODO: ? 如果是命令级别的语法错误，这个逻辑到这里有问题，这个语句会导致机器人什么都不发送而不是进行错字检查
+            # 命令按平台分流的模块，匹配不上是预期结果，不应报语法错误。
+            if module.suppress_invalid_prompt:
+                return
+            await msg.send_message(
+                I18NContext(
+                    "parser.command.invalid.syntax",
+                    module=command_first_word,
+                    prefix=msg.session_info.prefixes[0],
+                    cmd=ActionText(f"{msg.session_info.prefixes[0]}help {command_first_word}"),
                 )
+            )
             return
         except Exception as e:
             raise e
@@ -1203,7 +1430,7 @@ async def _process_tos_abuse_warning(msg: "Bot.MessageSession", e: AbuseWarning)
     :param msg: 消息会话对象
     :param e: 滥用警告异常对象
     """
-    if enable_tos and Config("tos_warning_counts", 5) >= 1 and not msg.check_super_user():
+    if enable_tos and CoreConfig.tos_warning_counts >= 1 and not msg.check_super_user():
         await abuse_warn_target(msg, str(e))
         temp_ban_counter[msg.session_info.sender_id] = {"count": 1, "ts": time.time()}
     else:
@@ -1276,7 +1503,7 @@ async def _process_exception(msg: "Bot.MessageSession", e: Exception):
     处理流程：
     1. 记录完整的错误堆栈到日志
     2. 向用户发送错误消息和报告提示
-    3. 如果配置了报告目标，发送详细错误报告给管理员
+    3. 如果配置了报告场景，发送详细错误报告给管理员
 
     :param msg: 消息会话对象
     :param e: 异常对象
@@ -1303,37 +1530,39 @@ async def _process_exception(msg: "Bot.MessageSession", e: Exception):
 
     # ========== 发送错误报告给管理员 ==========
     if report_targets:
-        for target in report_targets:
-            # 获取报告目标
-            if f := await bot.fetch_target(target):
-                # 发送详细的错误报告
-                await bot.send_direct_message(
-                    f,
-                    [
-                        I18NContext("error.message.report", command=msg.trigger_msg),
-                        Plain(tb.strip(), disable_joke=True),
-                    ],
-                    enable_parse_message=False,
-                    disable_secret_check=True,
-                )
+        # 上报场景按场景组配置，展开后同一现实场景的多个平台入口只应由其中一个收到回传
+        for f in await bot.pick_channel_heads(await bot.fetch_union_target_list(report_targets)):
+            # 发送详细的错误报告
+            await bot.send_direct_message(
+                f,
+                [
+                    I18NContext("error.message.report", command=msg.trigger_msg),
+                    Plain(tb.strip(), disable_joke=True),
+                ],
+                enable_parse_message=False,
+                disable_secret_check=True,
+            )
 
 
 def __get_close_matches(
-    word: str,
-    possibilities: list[str],
-    n: int = 3,
-    cutoff: float = 0.6,
-    return_scores: bool = False,
-) -> list[str] | list[tuple[str, float]]:
-    """使用 RapidFuzz 查找最接近的匹配项。
+    word: str, possibilities: list[str], n: int = 3, cutoff: float = 0.6, return_scores: bool = False
+) -> list[str] | list[tuple]:
+    """使用 RapidFuzz 查找最接近的匹配项
 
-    :param word: 目标搜索字符串。
+    :param word: 待搜索的字符串。
+    :type word: str
     :param possibilities: 候选字符串列表。
+    :type possibilities: List[str]
     :param n: 最大返回结果数量，默认为 3。
+    :type n: int
     :param cutoff: 相似度阈值 (0.0-1.0)，低于此值的结果将被忽略，默认为 0.6。
+    :type cutoff: float
     :param return_scores: 若为 True，返回包含分数的元组列表；否则仅返回字符串列表。
-    :return: 匹配结果列表。若 return_scores 为 False，返回 list[str]；
-             否则返回 list[tuple[str, float]]，其中分数已归一化为 0.0-1.0。
+    :type return_scores: bool
+
+    :return: 匹配结果列表。若 return_scores 为 False，返回 List[str]；
+             否则返回 List[Tuple[str, float]]，其中分数已归一化为 0.0-1.0。
+    :rtype: Union[List[str], List[tuple]]
     """
     if not 0.0 <= cutoff <= 1.0:
         raise ValueError("cutoff must be between 0.0 and 1.0")
@@ -1375,179 +1604,25 @@ async def _typo_confirm(
     return None, None, True
 
 
-def _filter_available_modules(modules: dict, msg: "Bot.MessageSession", bot: "Bot") -> list[str]:
-    """根据权限、启用状态等条件过滤出用户可用的模块名列表。"""
-    is_base_superuser = msg.session_info.sender_id in bot.base_superuser_list
-    is_superuser = msg.check_super_user()
-    available = []
-
-    for name, module in modules.items():
-        if not (module.base or name in msg.session_info.enabled_modules):
-            continue
-        if module.hidden:
-            continue
-        if module.required_superuser and not is_superuser:
-            continue
-        if module.required_base_superuser and not is_base_superuser:
-            continue
-        if not module.command_list.get(msg.session_info.target_from):
-            continue
-        available.append(name)
-
-    return available
-
-
-def _find_close_module(command_first_word: str, available_modules: list[str]) -> str | None:
-    """使用 rapidfuzz 查找最接近的模块名，并进行长度差异过滤。"""
-    if not available_modules:
-        return None
-
-    matches = __get_close_matches(command_first_word, available_modules, 1, typo_check_module_score)
-    if not matches:
-        return None
-
-    matched = matches[0]
-    input_len = len(command_first_word)
-    match_len = len(matched)
-    if input_len != match_len:
-        max_len = max(input_len, match_len)
-        min_len = min(input_len, match_len)
-        if min_len / max_len < typo_check_module_diff_ratio:
-            Logger.debug(
-                f"Module name length difference too large: "
-                f"input='{command_first_word}'({input_len}), match='{matched}'({match_len}), "
-                f"ratio={min_len / max_len:.2f} < {typo_check_module_diff_ratio}"
-            )
-            return None
-
-    Logger.debug(f"Match module: {command_first_word} -> {matched}")
-    return matched
-
-
-def _has_command_templates(module: Module, target_from: str) -> bool:
-    """检查模块在指定平台是否有命令模板。"""
-    for func in module.command_list.get(target_from):
-        if func.command_template:
-            return True
-    return False
-
-
-def _group_templates_by_arg_count(commands: list[CommandMeta], target_from: str) -> dict[int, list[argsTemplate]]:
-    """按参数数量对命令模板分组。"""
-    grouped: dict[int, list[argsTemplate]] = {}
-    for func in commands:
-        templates = copy.deepcopy(func.command_template)
-        for template in templates:
-            template.args_ = [a for a in template.args if isinstance(a, ArgumentPattern)]
-            arg_count = len(template.args)
-            grouped.setdefault(arg_count, []).append(template)
-    return grouped
-
-
-def _select_templates_by_arg_count(grouped_templates: dict[int, list], user_arg_count: int) -> list:
-    """根据用户输入参数数量选择最合适的模板组。"""
-    max_template_args = max(grouped_templates.keys())
-    if user_arg_count > max_template_args:
-        return grouped_templates[max_template_args]
-
-    if user_arg_count in grouped_templates:
-        return grouped_templates[user_arg_count]
-
-    closest_count = min(grouped_templates.keys(), key=lambda k: abs(k - user_arg_count))
-    return grouped_templates[closest_count]
-
-
-def _find_close_command(user_args_str: str, templates: list, user_arg_count: int) -> str | None:
-    """在模板组中查找与用户输入最相似的命令字符串。"""
-    selected_arg_count = len(templates[0].args)
-    max_count = max(user_arg_count, selected_arg_count)
-    min_count = min(user_arg_count, selected_arg_count)
-
-    if max_count > 0 and min_count / max_count < typo_check_args_diff_ratio:
-        Logger.debug(
-            f"Word count difference too large: user={user_arg_count}, template={selected_arg_count}, "
-            f"ratio={min_count / max_count:.2f} < {typo_check_args_diff_ratio}"
-        )
-        return None
-
-    matches = __get_close_matches(user_args_str, templates_to_str(templates), 1, typo_check_command_score)
-    if not matches:
-        return None
-
-    Logger.debug(f"Match command: {user_args_str} -> {matches[0]}")
-    return matches[0]
-
-
-def _merge_optional_part(option_part: str, remaining_args: list[str], new_command: list[str]) -> None:
-    """将可选参数片段合并到重建的命令中。"""
-    option_tokens = option_part.split(" ")
-    if len(option_tokens) > 1:
-        flag = option_tokens[0][1:]
-        matches = __get_close_matches(flag, remaining_args, 1, typo_check_options_score)
-        if matches:
-            Logger.debug(f"Match close options: {flag} -> {matches[0]}")
-            position = remaining_args.index(matches[0])
-            new_command.append(flag)
-            new_command.extend(remaining_args[position + 1 : position + len(option_tokens)])
-            del remaining_args[position : position + len(option_tokens)]
-        return
-
-    inner = option_tokens[0][1:-1]
-    if inner.startswith("<"):
-        if remaining_args:
-            new_command.append(remaining_args[0])
-            del remaining_args[0]
-    else:
-        new_command.append(inner)
-
-
-def _merge_required_part(required_part: str, remaining_args: list[str], new_command: list[str]) -> None:
-    """将必需参数片段合并到重建的命令中。"""
-    for token in filter(None, required_part.split(" ")):
-        if not remaining_args:
-            new_command.append(token)
-            continue
-
-        if token.startswith("<"):
-            new_command.append(remaining_args[0])
-            del remaining_args[0]
-            continue
-
-        match_result = process.extractOne(remaining_args[0], [token], score_cutoff=typo_check_args_score * 100)
-        if match_result:
-            Logger.debug(f"Match close args: {remaining_args[0]} -> {match_result[0]}")
-            new_command.append(token)
-        else:
-            new_command.append(remaining_args[0])
-        del remaining_args[0]
-
-
-async def _rebuild_command_from_typo(
-    matched_command: str,
-    original_args: list[str],
-    matched_module_name: str,
-    msg: "Bot.MessageSession",
-):
-    """根据匹配到的命令模板和原始参数重建命令，并询问用户确认。"""
-    new_command = [matched_module_name]
-    remaining_args = original_args.copy()
-
-    for part in filter(None, re.split(r"(\[.*?])", matched_command)):
-        if part.startswith("["):
-            _merge_optional_part(part, remaining_args, new_command)
-        else:
-            _merge_required_part(part, remaining_args, new_command)
-
-    display_command = " ".join(new_command)
-    return await _typo_confirm(msg, display_command, new_command[0], display_command)
-
-
 async def _command_typo_check(msg: "Bot.MessageSession", modules, command_first_word):
     """
     命令错字检查和纠正。
 
     该函数实现了智能的错字纠正功能，当用户输入的命令无法匹配时，
     尝试找出最接近的正确命令并询问用户是否需要纠正。
+
+    纠正流程：
+    1. 模块名纠正：查找相似的模块名
+    2. 命令参数纠正：根据模板匹配相似的命令结构
+    3. 可选参数纠正：匹配可选标志和参数
+    4. 必需参数纠正：匹配必需参数
+    5. 询问用户确认：显示建议的命令并等待确认
+
+    相似度评分：
+    - 模块名阈值：typo_check_module_score (默认 0.6)
+    - 命令阈值：typo_check_command_score (默认 0.3)
+    - 选项阈值：typo_check_options_score (默认 0.3)
+    - 参数阈值：typo_check_args_score (默认 0.5)
 
     :param msg: 消息会话对象
     :param modules: 可用的模块字典
@@ -1557,37 +1632,193 @@ async def _command_typo_check(msg: "Bot.MessageSession", modules, command_first_
              - 如果用户拒绝或无法纠正，返回 (None, None, confirmed)
     """
     bot: "Bot" = exports["Bot"]
-    available_modules = _filter_available_modules(modules, msg, bot)
-    matched_module = _find_close_module(command_first_word, available_modules)
-    if not matched_module:
-        return None, None, False
 
-    module = modules[matched_module]
-    command_split = msg.trigger_msg.split(" ")
-    len_command_split = len(command_split)
-    user_arg_count = len_command_split - 1
+    # ========== 步骤 1: 获取用户权限 ==========
+    is_base_superuser = msg.session_info.sender_id in bot.base_superuser_list
+    is_superuser = msg.check_super_user()
 
-    if not _has_command_templates(module, msg.session_info.target_from) or user_arg_count == 0:
-        new_trigger_msg = matched_module + (" " + " ".join(command_split[1:]) if len_command_split > 1 else "")
-        result = await _typo_confirm(msg, new_trigger_msg, matched_module, new_trigger_msg)
-        return result if result else (None, None, False)
+    # ========== 步骤 2: 收集用户可用的模块列表 ==========
+    available_modules = []
+    for x in modules:
+        # 筛选条件：基础模块或已启用的模块
+        if modules[x].base or (x in msg.session_info.enabled_modules):
+            # 跳过隐藏模块
+            if modules[x].hidden:
+                continue
+            # 跳过需要超级用户权限的模块（如果用户不是超级用户）
+            if modules[x].required_superuser and not is_superuser:
+                continue
+            # 跳过需要基础超级用户权限的模块
+            if modules[x].required_base_superuser and not is_base_superuser:
+                continue
+            # 跳过当前平台没有可用命令的模块（如仅含 regex 的模块，不能作为命令调用）
+            if not modules[x].command_list.get(msg.session_info.target_from):
+                continue
+            available_modules.append(x)
 
-    commands = module.command_list.get(msg.session_info.target_from)
-    grouped_templates = _group_templates_by_arg_count(commands, msg.session_info.target_from)
-    selected_templates = _select_templates_by_arg_count(grouped_templates, user_arg_count)
-    matched_command = _find_close_command(" ".join(command_split[1:]), selected_templates, user_arg_count)
+    # ========== 步骤 3: 模块名相似度匹配 ==========
+    # 使用 rapidfuzz 找出最接近的模块名
+    match_close_module: list = __get_close_matches(command_first_word, available_modules, 1, typo_check_module_score)
 
-    if matched_command:
-        result = await _rebuild_command_from_typo(matched_command, command_split[1:], matched_module, msg)
-        if result:
-            return result
-    elif user_arg_count == 1:
-        new_command_display = f"{matched_module} {' '.join(command_split[1:])}"
-        new_trigger_msg = " ".join([matched_module] + command_split[1:])
-        result = await _typo_confirm(msg, new_command_display, matched_module, new_trigger_msg)
-        if result:
-            return result
+    if match_close_module:
+        # 找到了相似的模块
+        Logger.debug(f"Match module: {command_first_word} -> {match_close_module[0]}")
 
+        # ========== 步骤 3.5: 模块名字符长度差异检查 ==========
+        # 避免短输入匹配到过长的模块名（如 ~p → ~decrypt）
+        input_len = len(command_first_word)
+        match_len = len(match_close_module[0])
+        if input_len != match_len:
+            max_len = max(input_len, match_len)
+            min_len = min(input_len, match_len)
+            if min_len / max_len < typo_check_module_diff_ratio:
+                Logger.debug(
+                    f"Module name length difference too large: "
+                    f"input='{command_first_word}'({input_len}), match='{match_close_module[0]}'({match_len}), "
+                    f"ratio={min_len / max_len:.2f} < {typo_check_module_diff_ratio}"
+                )
+                match_close_module = []
+
+    if match_close_module:
+        module: Module = modules[match_close_module[0]]
+
+        # ========== 步骤 4: 检查模块是否有命令模板 ==========
+        none_template = True
+        for func in module.command_list.get(msg.session_info.target_from):
+            if func.command_template:
+                none_template = False
+                break
+
+        command_split = msg.trigger_msg.split(" ")
+        len_command_split = len(command_split)
+
+        # ========== 步骤 5: 命令参数匹配（仅对有模板的模块）==========
+        if not none_template and len_command_split > 1:
+            get_commands: list[CommandMeta] = module.command_list.get(msg.session_info.target_from)
+
+            # 根据参数数量对命令模板分组
+            # 格式: [参数数量 -> [模板列表]]
+            command_templates = {}
+            for func in get_commands:
+                command_template: list[argsTemplate] = copy.deepcopy(func.command_template)
+                for ct in command_template:
+                    # 只保留 ArgumentPattern（过滤描述等）
+                    ct.args_ = [a for a in ct.args if isinstance(a, ArgumentPattern)]
+                    if (len_args := len(ct.args)) not in command_templates:
+                        command_templates[len_args] = [ct]
+                    else:
+                        command_templates[len_args].append(ct)
+
+            # ========== 步骤 6: 选择最合适的命令模板组 ==========
+            max_template_args = max(command_templates.keys())
+            if len_command_split - 1 > max_template_args:
+                # 用户输入的参数比所有模板都多，选择参数最多的模板
+                select_templates = command_templates[max_template_args]
+            else:
+                try:
+                    # 选择参数数量刚好匹配的模板组
+                    select_templates = command_templates[len_command_split - 1]
+                except KeyError:
+                    # 没有精确匹配，找一个最接近的（参数数量差距最小）
+                    select_templates = command_templates[
+                        min(command_templates.keys(), key=lambda k: abs(k - (len_command_split - 1)))
+                    ]
+
+            # ========== 步骤 7: 参数数量差异检查 ==========
+            # 如果用户输入的参数数量与模板参数数量差异过大，跳过命令匹配
+            selected_arg_count = len(select_templates[0].args)
+            user_arg_count = len_command_split - 1
+            max_count = max(user_arg_count, selected_arg_count)
+            min_count = min(user_arg_count, selected_arg_count)
+
+            if max_count > 0 and min_count / max_count < typo_check_args_diff_ratio:
+                Logger.debug(
+                    f"Word count difference too large: user={user_arg_count}, template={selected_arg_count}, "
+                    f"ratio={min_count / max_count:.2f} < {typo_check_args_diff_ratio}"
+                )
+                match_close_command = []
+            else:
+                # ========== 步骤 8: 命令字符串相似度匹配 ==========
+                match_close_command: list = __get_close_matches(
+                    " ".join(command_split[1:]), templates_to_str(select_templates), 1, typo_check_command_score
+                )
+
+            if match_close_command:
+                # 找到了相似的命令
+                Logger.debug(f"Match command: {' '.join(command_split[1:])} -> {match_close_command[0]}")
+                match_split = match_close_command[0]
+
+                # ========== 步骤 9: 分离可选参数 ==========
+                # 切割可选参数（[...]）和必需参数
+                m_split_options = filter(None, re.split(r"(\[.*?\])", match_split))
+                old_command_split = command_split.copy()
+                del old_command_split[0]  # 删除模块名
+                new_command_split = [match_close_module[0]]
+                for m_ in m_split_options:
+                    if m_.startswith("["):  # 如果是可选参数
+                        m_split = m_.split(" ")  # 切割可选参数中的空格（说明存在多个子必须参数）
+                        if len(m_split) > 1:
+                            match_close_options = __get_close_matches(
+                                m_split[0][1:], old_command_split, 1, typo_check_options_score
+                            )  # 进一步匹配可选参数
+                            if match_close_options:
+                                Logger.debug(f"Match close options: {m_split[0][1:]} -> {match_close_options[0]}")
+                                position = old_command_split.index(match_close_options[0])  # 定位可选参数的位置
+                                new_command_split.append(m_split[0][1:])  # 将可选参数插入到新命令列表中
+                                new_command_split += old_command_split[position + 1 : position + len(m_split)]
+                                del old_command_split[position : position + len(m_split)]  # 删除原命令列表中的可选参数
+                        else:
+                            if m_split[0][1] == "<":
+                                if old_command_split:
+                                    new_command_split.append(old_command_split[0])
+                                    del old_command_split[0]
+                            else:
+                                new_command_split.append(m_split[0][1:-1])
+                    else:
+                        m__ = filter(None, m_.split(" "))  # 必须参数
+                        for mm in m__:
+                            if len(old_command_split) > 0:
+                                if mm.startswith("<"):
+                                    new_command_split.append(old_command_split[0])
+                                    del old_command_split[0]
+                                else:
+                                    # 直接检查相似度是否超过阈值（避免对单元素列表做完整 extract）
+                                    match_result = process.extractOne(
+                                        old_command_split[0], [mm], score_cutoff=typo_check_args_score * 100
+                                    )
+                                    if match_result:
+                                        Logger.debug(f"Match close args: {old_command_split[0]} -> {match_result[0]}")
+                                        new_command_split.append(mm)
+                                        del old_command_split[0]
+                                    else:
+                                        new_command_split.append(old_command_split[0])
+                                        del old_command_split[0]
+                            else:
+                                new_command_split.append(mm)
+                new_command_display = " ".join(new_command_split)
+                result = await _typo_confirm(
+                    msg, new_command_display, new_command_split[0], " ".join(new_command_split)
+                )
+                if result:
+                    return result
+            else:
+                if len_command_split - 1 == 1:
+                    new_command_display = f"{match_close_module[0]} {' '.join(command_split[1:])}"
+                    result = await _typo_confirm(
+                        msg,
+                        new_command_display,
+                        match_close_module[0],
+                        " ".join([match_close_module[0]] + command_split[1:]),
+                    )
+                    if result:
+                        return result
+        else:
+            new_trigger_msg = match_close_module[0] + (
+                " " + " ".join(command_split[1:]) if len(command_split) > 1 else ""
+            )
+            result = await _typo_confirm(msg, new_trigger_msg, match_close_module[0], new_trigger_msg)
+            if result:
+                return result
     return None, None, False
 
 

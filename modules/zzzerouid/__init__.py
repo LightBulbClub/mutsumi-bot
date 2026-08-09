@@ -1,4 +1,5 @@
 from core.builtins.bot import Bot
+from core.component import module
 
 from .commands.ann import clear_ann
 from .commands.char_detail import draw_card, refresh_card
@@ -15,10 +16,17 @@ from .commands.month_info import draw_month_info
 from .commands.roleinfo import draw_role_info
 from .commands.stamina import draw_stamina
 from .commands.void import draw_void
-from .config import zzz
 from .utils.hint import BIND_UID_HINT
 from .utils.uid import get_uid
 
+zzz = module(
+    "zzz",
+    alias="zenless",
+    developers=["SoftGreyMon", "haoye_qwq"],
+    support_languages=["zh_cn", "en_us"],
+    desc="{I18N:zzzerouid.help.desc}",
+    doc=True,
+)
 
 @zzz.command("bind uid <uid> {I18N:zzzerouid.help.bind.uid}")
 async def _(msg: Bot.MessageSession, uid: str):

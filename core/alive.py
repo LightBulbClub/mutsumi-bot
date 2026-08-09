@@ -10,10 +10,11 @@ class Alive:
     def refresh_alive(
         cls,
         client_name: str,
-        target_prefix_list: list = None,
-        sender_prefix_list: list = None,
-        ctx_slot_index: int = None,
-        features: type[Features] = None,
+        target_prefix_list: list | None = None,
+        sender_prefix_list: list | None = None,
+        ctx_slot_index: int | None = None,
+        # 传入的是平台声明其能力的 Features 实例而非类
+        features: Features | None = None,
     ):
         cls.values[client_name] = {
             "target_prefix_list": target_prefix_list,
@@ -34,11 +35,23 @@ class Alive:
         return value
 
     @classmethod
+    def is_alive(cls, client_name: str) -> bool:
+        """
+        判断某个客户端是否仍在线。
+
+        客户端每 60 秒上报一次保活信号，超过 120 秒未收到即视为掉线。
+
+        :param client_name: 客户端名称
+        :return: 是否在线
+        """
+        return client_name in cls.get_alive()
+
+    @classmethod
     def determine_target_from(cls, target_id: str):
         """
-        确定会话 ID 前缀。
+        确定场景 ID 前缀。
 
-        :param target_id: 会话 ID
+        :param target_id: 场景 ID
         :return: 前缀
         """
         for _, data in cls.get_alive().items():
@@ -66,7 +79,7 @@ class Alive:
         """
         确定客户端名称。
 
-        :param id: 会话 ID 或用户 ID
+        :param id: 场景 ID 或用户 ID
         :return: 客户端名称
         """
         for client_name, data in cls.get_alive().items():

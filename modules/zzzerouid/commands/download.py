@@ -1,14 +1,13 @@
 import asyncio
 from pathlib import Path
 from urllib.parse import unquote
-
 from bs4 import BeautifulSoup
+from core.config import Config
 from core.builtins.bot import Bot
 from core.builtins.message.internal import Plain
 from core.utils.http import get_url
 from httpx import AsyncClient
 
-from ..config import RESOURCE_CDN
 from ..utils.resource import (
     CAMP_PATH,
     CAT_GUIDE_PATH,
@@ -23,6 +22,8 @@ from ..utils.resource import (
     SUIT_PATH,
     WEAPON_PATH,
 )
+
+RESOURCE_CDN = Config("resource_cdn", DEFAULT_CDN, table_name="module_zzzerouid")
 
 EPATH_MAP = {
     "guide/flower": FLOWER_GUIDE_PATH,
