@@ -1,0 +1,10 @@
+[module_zzz]
+# 모듈의 구성 섹션입니다. 여기에 입력한 값은 메시지에 일반 텍스트로 표시됩니다. 민감한 정보는 이 섹션에 입력하지 마십시오.
+sched_energy_push = true # {I18N:config.comments.module_zzz.sched_energy_push}
+widget_resin = true # {I18N:config.comments.module_zzz.widget_resin}
+crazy_notice = false # {I18N:config.comments.module_zzz.crazy_notice}
+refresh_bg = "bg2" # {I18N:config.comments.module_zzz.refresh_bg}
+zzz_guide_provide = "猫冬" # {I18N:config.comments.module_zzz.zzz_guide_provide}
+refresh_card_use_pic = true # {I18N:config.comments.module_zzz.refresh_card_use_pic}
+enable_custom_char_bg = false # {I18N:config.comments.module_zzz.enable_custom_char_bg}
+refresh_data_list = ["ENKA", "MINIGG", "MYS"] # {I18N:config.comments.module_zzz.refresh_data_list}

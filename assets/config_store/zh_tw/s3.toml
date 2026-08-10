@@ -1,7 +1,3 @@
-# https://toml.io/cn/v1.0.0
-# 注意：TOML 不是 Python。請不要在此處使用 Python 語法。
-# 例如：TOML 中的布林值必須是小寫。
-
 [s3]
 # S3 相容 API 的組態部分，此處填寫的值可在訊息中以明文形式顯示。請不要在此部分填寫敏感資訊。
 s3_endpoint_url = "<Replace me with str value>" # S3 相容 API 的端點 URL。
