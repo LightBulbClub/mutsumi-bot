@@ -99,7 +99,7 @@ dependencies = [
     "webcolors>=25.0.0,<26.0.0",
     "wikitextparser>=1.0.3",
     "wolframalpha>=5.0.0,<6.0.0",
-    "botpy @ git+https://github.com/Teahouse-Studios/botpy.git",
+    "qq-botpy-sdk @ git+https://github.com/Teahouse-Studios/qq-botpy-sdk.git",
 ]
 [project.urls]
 Homepage = "https://github.com/LightBulbClub/mutsumi-bot"
