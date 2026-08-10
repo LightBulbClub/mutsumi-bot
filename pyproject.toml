@@ -99,7 +99,7 @@ dependencies = [
     "webcolors>=25.0.0,<26.0.0",
     "wikitextparser>=1.0.3",
     "wolframalpha>=5.0.0,<6.0.0",
-    "botpy",
+    "botpy @ git+https://github.com/Teahouse-Studios/botpy.git",
 ]
 [project.urls]
 Homepage = "https://github.com/LightBulbClub/mutsumi-bot"
@@ -119,10 +119,6 @@ package = false
 name = "tsinghua"
 url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/"
 default = true
-
-[tool.uv.sources]
-langconv = { git = "https://github.com/Teahouse-Studios/langconv.py.git" }
-botpy = { git = "https://github.com/Teahouse-Studios/botpy.git" }
 
 
 [build-system]

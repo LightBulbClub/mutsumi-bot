@@ -173,7 +173,6 @@ def multiprocess_run_until_complete(func):
 
 def go(bot_name: str, subprocess: bool = False, binary_mode: bool = False):
     from core.constants import Info
-    from core.logger import Logger
 
     Logger.info(f"[{bot_name}] Here we go!")
     Info.subprocess = subprocess
@@ -181,9 +180,10 @@ def go(bot_name: str, subprocess: bool = False, binary_mode: bool = False):
 
     try:
         importlib.import_module(f"bots.{bot_name}.bot")
-    except ModuleNotFoundError:
-        Logger.exception(f"[{bot_name}] ???, entry not found.")
-
+    except Exception:
+        # 适配器通常在导入阶段完成 SDK 登录；不能只捕获 ModuleNotFoundError，
+        # 否则认证、网络和 SDK 初始化异常只会出现在子进程 stderr 中，守护进程日志看不到原因。
+        Logger.error(f"[{bot_name}] Failed to start.\n{traceback.format_exc()}")
         sys.exit(1)
 
 
