@@ -73,10 +73,7 @@ class CQCodeHandler:
                 ma = re.match(r"(.*?)=(.*)", a)
                 if ma:
                     if cq_type == "json":
-                        try:
-                            kwargs[html.unescape(ma.group(1))] = orjson.loads(html.unescape(ma.group(2)))
-                        except orjson.JSONDecodeError:
-                            return None
+                        kwargs[html.unescape(ma.group(1))] = orjson.loads(ma.group(2))
                     else:
                         kwargs[html.unescape(ma.group(1))] = html.unescape(ma.group(2))
         data = {"type": cq_type, "data": kwargs}
