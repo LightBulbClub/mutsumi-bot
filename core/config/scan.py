@@ -12,6 +12,8 @@ from loguru import logger
 
 from core.config import CFGManager
 
+Logger = logger.bind(name="BotDaemon")
+
 
 def iter_config_template_modules() -> list[str]:
     """列出全部配置模板的模块名。
@@ -50,6 +52,6 @@ def scan_config_templates() -> list[str]:
             importlib.import_module(module_name)
         except Exception:
             failed.append(module_name)
-            logger.exception(f"[Config] Failed to load config template {module_name}: ")
+            Logger.exception(f"[Config] Failed to load config template {module_name}: ")
     CFGManager.save()
     return failed

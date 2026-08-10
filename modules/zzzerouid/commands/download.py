@@ -23,6 +23,7 @@ from ..utils.resource import (
     WEAPON_PATH,
 )
 
+DEFAULT_CDN = "https://file.minigg.cn/sayu-bot/ZZZeroUID"
 RESOURCE_CDN = Config("resource_cdn", DEFAULT_CDN, table_name="module_zzzerouid")
 
 EPATH_MAP = {
@@ -40,7 +41,6 @@ EPATH_MAP = {
     "custom": CUSTOM_PATH,
 }
 
-DEFAULT_CDN = "https://file.minigg.cn/sayu-bot/ZZZeroUID"
 BATCH_SIZE = 1_500_000
 
 
