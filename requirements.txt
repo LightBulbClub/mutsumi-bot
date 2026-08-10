@@ -4,11 +4,13 @@ aiocqhttp==1.4.4
     # via mutsumi-bot (pyproject.toml)
 aiofile==3.11.1
     # via mutsumi-bot (pyproject.toml)
+aiogram==3.29.1
+    # via mutsumi-bot (pyproject.toml)
 akari-bot-i18n==0.0.4
     # via mutsumi-bot (pyproject.toml)
 akari-bot-webrender==0.5.14
     # via mutsumi-bot (pyproject.toml)
-akari-bot-webui==0.3.10
+akari-bot-webui==0.3.13
     # via mutsumi-bot (pyproject.toml)
 apscheduler==3.11.3
     # via mutsumi-bot (pyproject.toml)
@@ -18,13 +20,15 @@ attrs==25.4.0
     # via mutsumi-bot (pyproject.toml)
 beautifulsoup4==4.15.0
     # via mutsumi-bot (pyproject.toml)
+boto3==1.43.67
+    # via mutsumi-bot (pyproject.toml)
 botpy @ git+https://github.com/Teahouse-Studios/botpy.git@b4d6a58ba7daab99d18f2aa64c8e24e0e643a8ce
     # via mutsumi-bot (pyproject.toml)
 cattrs==26.1.0
     # via mutsumi-bot (pyproject.toml)
 coverage==7.15.1
     # via mutsumi-bot (pyproject.toml)
-cryptography==48.0.1
+cryptography==50.0.0
     # via mutsumi-bot (pyproject.toml)
 ddgs==9.14.4
     # via mutsumi-bot (pyproject.toml)
@@ -64,6 +68,8 @@ loguru==0.7.3
     # via mutsumi-bot (pyproject.toml)
 matplotlib==3.11.0
     # via mutsumi-bot (pyproject.toml)
+matrix-nio==0.26.0
+    # via mutsumi-bot (pyproject.toml)
 mcstatus==13.1.0
     # via mutsumi-bot (pyproject.toml)
 numpy==2.5.0
@@ -81,6 +87,8 @@ pint==0.25.3
 pre-commit==4.6.0
     # via mutsumi-bot (pyproject.toml)
 psutil==7.2.2
+    # via mutsumi-bot (pyproject.toml)
+py-cord==2.8.1
     # via mutsumi-bot (pyproject.toml)
 py-cpuinfo==9.0.0
     # via mutsumi-bot (pyproject.toml)
