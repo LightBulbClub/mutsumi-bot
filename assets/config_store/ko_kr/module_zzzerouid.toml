@@ -1,0 +1,3 @@
+[module_zzzerouid]
+# 모듈의 구성 섹션입니다. 여기에 입력한 값은 메시지에 일반 텍스트로 표시됩니다. 민감한 정보는 이 섹션에 입력하지 마십시오.
+resource_cdn = "https://file.minigg.cn/sayu-bot/ZZZeroUID" # {I18N:config.comments.module_zzzerouid.resource_cdn}

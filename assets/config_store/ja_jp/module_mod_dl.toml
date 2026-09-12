@@ -1,0 +1,3 @@
+[module_mod_dl_secret]
+# モジュールのキー設定項目です。ここに入力された値は、送信メッセージに誤って含まれた場合、ボットはそれを傍受しようとします。ただし、漏洩を防ぐよう注意してください。
+curseforge_api_key = "<Replace me with str value>" # CurseForge 的 API Key。
