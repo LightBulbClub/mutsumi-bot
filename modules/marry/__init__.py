@@ -41,23 +41,23 @@ async def marry(msg: Bot.MessageSession, change: bool, is_husband: bool = False)
             now = db.husband_name if is_husband else db.wife_name
     if now:
         now_files = os.listdir(assets / ("husband" if is_husband else "wife") / now)
-        await msg.finish(
+        await msg.send_message(
             [
                 Plain(f"你今天的老{"公" if is_husband else "婆"}是"),
                 Plain(now),
-                Image(assets / ("husband" if is_husband else "wife") / now / choice(now_files)),
             ]
         )
+        await msg.finish(Image(assets / ("husband" if is_husband else "wife") / now / choice(now_files)))
     _ = (await TodayWifeInfo.get_wife(sender_id=_id, name=chosen)) \
      if not is_husband else (await TodayHusbandInfo.get_husband(sender_id=_id, name=chosen))
     chosen_files = os.listdir(assets / ("husband" if is_husband else "wife") / chosen)
-    await msg.finish(
+    await msg.send_message(
         [
             Plain(f"成功！你今天的老{"公" if is_husband else "婆"}是"),
             Plain(chosen),
-            Image(assets / ("husband" if is_husband else "wife") / chosen / choice(chosen_files)),
         ]
     )
+    await msg.finish(Image(assets / ("husband" if is_husband else "wife") / chosen / choice(chosen_files)))
 
 
 @hsb.command("{获取今日二次元老公}")
