@@ -1,13 +1,12 @@
 import os
-from random import choice
-from datetime import datetime
 
 from core.builtins.bot import Bot
 from core.builtins.message.internal import Image, Plain
 from core.component import module
 from core.constants.path import assets_path
+from core.utils.random import Random
 
-from .database.models import TodayWifeInfo, TodayHusbandInfo
+from .database.models import MarryDeck, TodayHusbandInfo, TodayWifeInfo
 
 wif = module(
     "wife",
@@ -30,34 +29,33 @@ husband_names = os.listdir(assets / "husband")
 
 
 async def marry(msg: Bot.MessageSession, change: bool, is_husband: bool = False):
-    _id = msg.session_info.sender_id
+    sender_id = msg.session_info.sender_id
+    kind = "husband" if is_husband else "wife"
     names = husband_names if is_husband else wife_names
-    chosen = choice(names)
-    db = (await TodayHusbandInfo.get_or_none(sender_id=_id)) \
-     if is_husband else (await TodayWifeInfo.get_or_none(sender_id=_id))
-    now = None
-    if db and db.timestamp.date == datetime.date:
-        if not change:
-            now = db.husband_name if is_husband else db.wife_name
-    if now:
-        now_files = os.listdir(assets / ("husband" if is_husband else "wife") / now)
+    info_model = TodayHusbandInfo if is_husband else TodayWifeInfo
+
+    # 非更换时，今天已经抽过就直接沿用；否则从牌堆里新抽一张。
+    chosen = None if change else await info_model.get_today(sender_id)
+    if chosen:
         await msg.send_message(
             [
                 Plain(f"你今天的老{"公" if is_husband else "婆"}是"),
-                Plain(now),
+                Plain(chosen),
             ]
         )
-        await msg.finish(Image(assets / ("husband" if is_husband else "wife") / now / choice(now_files)))
-    _ = (await TodayWifeInfo.get_wife(sender_id=_id, name=chosen)) \
-     if not is_husband else (await TodayHusbandInfo.get_husband(sender_id=_id, name=chosen))
-    chosen_files = os.listdir(assets / ("husband" if is_husband else "wife") / chosen)
-    await msg.send_message(
-        [
-            Plain(f"成功！你今天的老{"公" if is_husband else "婆"}是"),
-            Plain(chosen),
-        ]
-    )
-    await msg.finish(Image(assets / ("husband" if is_husband else "wife") / chosen / choice(chosen_files)))
+    else:
+        # 牌堆随机抽牌：每张牌概率相等，且牌堆抽空前不会重复。
+        chosen = await MarryDeck.draw(sender_id=sender_id, is_husband=is_husband, names=names)
+        await info_model.set_today(sender_id, chosen)
+        await msg.send_message(
+            [
+                Plain(f"成功！你今天的老{"公" if is_husband else "婆"}是"),
+                Plain(chosen),
+            ]
+        )
+
+    chosen_files = os.listdir(assets / kind / chosen)
+    await msg.finish(Image(assets / kind / chosen / Random.choice(chosen_files)))
 
 
 @hsb.command("{获取今日二次元老公}")
