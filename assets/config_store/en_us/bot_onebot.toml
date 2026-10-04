@@ -1,3 +1,7 @@
+# https://toml.io/en/v1.0.0
+# NOTE: TOML is not like Python. Do not use Python syntax here.
+# EXAMPLE: Boolean values in TOML must be lowercase.
+
 [bot_onebot]
 # The basic config section of the client. The values entered here can be displayed in the message. Please do not enter sensitive information in this section.
 enable = false # Whether to enable this client.
