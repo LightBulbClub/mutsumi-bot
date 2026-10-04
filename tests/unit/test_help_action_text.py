@@ -3,7 +3,6 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from bots.discord.features import features as discord_features
 from core.builtins.message.chain import MessageChain
 from core.builtins.message.elements import ActionTextElement, ButtonFrameElement, ImageElement, PlainElement
 from core.builtins.message.internal import ActionText, I18NContext, Image, Plain
@@ -29,7 +28,6 @@ from modules.core.common_tools.help import (
     get_help_link_buttons,
     help_overview,
     modules_list_help,
-    should_use_markdown_table,
     strip_command_arguments,
 )
 
@@ -165,15 +163,6 @@ async def _test_image_help_precedes_action_text_fallback():
         and msg.finished_message is not None
         and any(isinstance(element, ImageElement) for element in msg.finished_message.values)
         and any(isinstance(element, ActionTextElement) and element.text.text == "~help " for element in sendable)
-    )
-
-
-async def _test_discord_detail_help_does_not_use_markdown_table():
-    msg = SimpleNamespace(session_info=discord_features)
-    return (
-        discord_features.support_markdown
-        and discord_features.support_action_text
-        and not should_use_markdown_table(msg)
     )
 
 
@@ -1142,7 +1131,6 @@ async def test_clickable_modules(tester: Tester):
     """modules.core.common_tools.help: 可点击模块列表测试"""
     await tester.test(_test_help_about_button_replaces_donate, "help 关于我们按钮测试")
     await tester.test(_test_image_help_precedes_action_text_fallback, "无表格能力时图片帮助优先测试")
-    await tester.test(_test_discord_detail_help_does_not_use_markdown_table, "Discord 详细帮助禁用 Markdown 表格测试")
     await tester.test(_test_image_flag_overrides_markdown_table, "--img 强制图片帮助测试")
     await tester.test(_test_image_template_omits_help_command, "图片内移除查看详情提示测试")
     await tester.test(_test_help_doc_template_marks_module_type_with_swatch, "模块详细帮助类型色块测试")

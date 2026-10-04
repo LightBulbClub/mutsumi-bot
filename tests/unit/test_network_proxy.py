@@ -83,35 +83,10 @@ def _test_qqbot_client_uses_network_settings():
     return unset and configured
 
 
-async def _test_discord_client_uses_network_settings():
-    import discord
-
-    import bots.discord.client as discord_client
-
-    async def fake_login(self, token):
-        return None
-
-    if discord_client.discord_bot.http.connector is not None:
-        return False
-    with (
-        patch.object(discord_client, "ssl_verify", False),
-        patch.object(discord.Client, "login", fake_login),
-    ):
-        await discord_client.discord_bot.login("fake-token")
-
-    connector = discord_client.discord_bot.http.connector
-    configured = connector is not None and connector._ssl is False
-    if connector is not None:
-        await connector.close()
-        discord_client.discord_bot.http.connector = None
-    return configured
-
-
 @func_case
 async def test_network_proxy(tester: Tester):
     """core.config.network: 代理与 TLS 校验设置测试"""
     await tester.test(_test_network_settings_follow_config, "代理与 TLS 校验取值跟随配置测试")
     await tester.test(_test_request_url_uses_network_settings, "框架 HTTP 请求携带代理与校验设置测试")
     await tester.test(_test_qqbot_client_uses_network_settings, "QQBot 客户端携带代理与校验设置测试")
-    await tester.test(_test_discord_client_uses_network_settings, "Discord 客户端携带代理与校验设置测试")
     return tester

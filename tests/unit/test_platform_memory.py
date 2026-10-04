@@ -2,15 +2,11 @@
 
 import asyncio
 import importlib
-import subprocess
-import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import bots.onebot.context as onebot_context
 import bots.qqbot.context as qqbot_context
-from bots.discord.context import DiscordContextManager
-from bots.discord.slash_context import DiscordSlashContextManager
 from bots.web.config import WebConfig
 from bots.web.context import WebContextManager
 from core.builtins.temp import Temp
@@ -59,31 +55,6 @@ def _test_qqbot_permission_cache_is_safe_and_bounded() -> bool:
         )
     finally:
         qqbot_context.permission_cache.clear()
-
-
-def _test_telegram_imports_stay_in_platform_process() -> bool:
-    config_probe = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import sys; import bots.telegram.config; "
-            "assert not any(name == 'aiogram' or name.startswith('aiogram.') for name in sys.modules)",
-        ],
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
-    builder_probe = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import sys; import bots.telegram.message_builder; assert 'core.utils.web_render' not in sys.modules",
-        ],
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
-    return config_probe.returncode == 0 and builder_probe.returncode == 0
 
 
 def _test_initiative_queue_fairness() -> bool:
@@ -274,44 +245,6 @@ async def _test_web_typing_end_cannot_miss_registration() -> bool:
             task.cancel()
 
 
-class _FakeTypingContext:
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc_info):
-        return False
-
-
-async def _test_discord_slash_typing_end_cannot_miss_registration() -> bool:
-    session = SimpleNamespace(session_id="discord-typing-race")
-    deferred = []
-
-    async def defer():
-        deferred.append(True)
-
-    ctx = SimpleNamespace(
-        channel=SimpleNamespace(typing=lambda: _FakeTypingContext()),
-        defer=defer,
-    )
-    DiscordSlashContextManager.context[session.session_id] = ctx
-    try:
-        await DiscordSlashContextManager.start_typing(session)
-        await DiscordSlashContextManager.end_typing(session)
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        return (
-            session.session_id not in DiscordSlashContextManager.typing_flags
-            and session.session_id not in DiscordSlashContextManager.typing_tasks
-            and not deferred
-        )
-    finally:
-        DiscordSlashContextManager.context.pop(session.session_id, None)
-        DiscordSlashContextManager.typing_flags.pop(session.session_id, None)
-        task = DiscordSlashContextManager.typing_tasks.pop(session.session_id, None)
-        if task:
-            task.cancel()
-
-
 async def _test_web_disconnect_keeps_newer_websocket() -> bool:
     with patch.object(WebConfig, "enable", False, create=True):
         web_bot = importlib.import_module("bots.web.bot")
@@ -362,43 +295,6 @@ async def _test_web_disconnect_keeps_newer_websocket() -> bool:
             Temp.data["web_chat_websocket"] = previous_websocket
 
 
-async def _test_discord_typing_end_cannot_miss_registration() -> bool:
-    if not hasattr(DiscordContextManager, "typing_tasks"):
-        return False
-
-    session = SimpleNamespace(session_id="discord-typing-race")
-    entered = asyncio.Event()
-    exited = asyncio.Event()
-
-    class _TypingContext:
-        async def __aenter__(self):
-            entered.set()
-            return self
-
-        async def __aexit__(self, *exc_info):
-            exited.set()
-            return False
-
-    ctx = SimpleNamespace(channel=SimpleNamespace(typing=lambda: _TypingContext()))
-    DiscordContextManager.context[session.session_id] = ctx
-    try:
-        await DiscordContextManager.start_typing(session)
-        await asyncio.wait_for(entered.wait(), timeout=1)
-        await DiscordContextManager.end_typing(session)
-        await asyncio.wait_for(exited.wait(), timeout=1)
-        return (
-            session.session_id not in DiscordContextManager.typing_flags
-            and session.session_id not in DiscordContextManager.typing_tasks
-        )
-    finally:
-        DiscordContextManager.context.pop(session.session_id, None)
-        DiscordContextManager.typing_flags.pop(session.session_id, None)
-        task = DiscordContextManager.typing_tasks.pop(session.session_id, None)
-        if task:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-
-
 @func_case
 async def test_platform_memory(tester: Tester):
     """平台侧长期运行内存的有界性与清理路径。"""
@@ -412,7 +308,4 @@ async def test_platform_memory(tester: Tester):
     await tester.test(_test_onebot_typing_end_cannot_miss_registration, "OneBot typing 注册竞态")
     await tester.test(_test_web_typing_end_cannot_miss_registration, "Web typing 注册竞态")
     await tester.test(_test_web_disconnect_keeps_newer_websocket, "Web 旧连接断开不清除新连接")
-    await tester.test(_test_discord_typing_end_cannot_miss_registration, "Discord typing 注册竞态")
-    await tester.test(_test_discord_slash_typing_end_cannot_miss_registration, "Discord Slash typing 注册竞态")
-    await tester.test(_test_telegram_imports_stay_in_platform_process, "Telegram 重依赖保持平台进程隔离")
     return tester

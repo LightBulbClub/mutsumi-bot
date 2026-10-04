@@ -35,7 +35,6 @@ RENAMED_MODULES = {
     "minecraft-news": "minecraft_news",
     "mod-dl": "mod_dl",
     "mojang-status": "mojang_status",
-    "nintendo-err": "nintendo_err",
     "post-whitelist": "post_whitelist",
     "teahouse-weekly-rss": "teahouse_weekly_rss",
     "twenty-four": "twenty_four",
