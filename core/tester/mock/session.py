@@ -2,12 +2,15 @@ import asyncio
 import os
 
 from core.builtins.message.chain import get_message_chain, MessageChain
-from core.builtins.message.elements import PlainElement, ImageElement, MentionElement, BaseElement
+from core.builtins.message.elements import ButtonFrameElement, PlainElement, ImageElement, MentionElement, BaseElement
+from core.builtins.message.internal import Button
 from core.builtins.session.info import SessionInfo
+from core.builtins.session.bot_state import BotState
 from core.builtins.session.internal import MessageSession, I18NContext
 from core.builtins.utils import confirm_command
 from core.config.base import CoreConfig
 from core.constants.exceptions import SessionFinished
+from core.utils.button import bind_callback_reply_ids
 
 
 class MockMessageSession(MessageSession):
@@ -43,20 +46,15 @@ class MockMessageSession(MessageSession):
         message_chain,
         quote=True,
         disable_secret_check=False,
-        enable_parse_message=True,
-        enable_split_image=True,
         callback=None,
         callback_id=None,
-        button_data=None,
-        force_markdown=False,
+        callback_timeout=1800,
+        callback_once=False,
     ):
-        # force_markdown 只影响平台的发送路径，测试替身不作区分，签名对齐即可
-        if button_data:
-            self.buttons.extend(button_data)
-
         message = get_message_chain(self.session_info, chain=message_chain)
-
-        for x in message.as_sendable(self.session_info, parse_message=enable_parse_message):
+        if callback:
+            bind_callback_reply_ids(message, callback_id)
+        for x in message.as_sendable(self.session_info):
             self.sent.append(x)
             if isinstance(x, PlainElement):
                 self.action.append(x.text)
@@ -64,6 +62,8 @@ class MockMessageSession(MessageSession):
                 self.action.append(str(x))
             elif isinstance(x, MentionElement):
                 self.action.append(f"<@{x.client}|{str(x.id)}>")
+            elif isinstance(x, ButtonFrameElement):
+                self.buttons.extend([{button.show: button.value for button in row.buttons} for row in x.rows])
             elif isinstance(x, BaseElement):
                 self.action.append(str(x))
 
@@ -76,25 +76,25 @@ class MockMessageSession(MessageSession):
         message_chain=None,
         quote=True,
         disable_secret_check=False,
-        enable_parse_message=True,
-        enable_split_image=True,
         callback=None,
         callback_id=None,
-        button_data=None,
-        force_markdown=False,
+        callback_timeout=1800,
+        callback_once=False,
     ):
         if message_chain:
-            await self.send_message(message_chain, button_data=button_data, force_markdown=force_markdown)
-        elif button_data:
-            self.buttons.extend(button_data)
+            await self.send_message(
+                message_chain,
+                callback=callback,
+                callback_id=callback_id,
+                callback_timeout=callback_timeout,
+                callback_once=callback_once,
+            )
         raise SessionFinished
 
     async def send_direct_message(
         self,
         message_chain,
         disable_secret_check=False,
-        enable_parse_message=True,
-        enable_split_image=True,
     ):
         await self.send_message(message_chain)
 
@@ -103,8 +103,6 @@ class MockMessageSession(MessageSession):
         message_chain,
         user_id=None,
         disable_secret_check=False,
-        enable_parse_message=True,
-        enable_split_image=True,
     ):
         user_id = user_id or self.session_info.sender_id
         self.action.append(f"(private message to {user_id})")
@@ -114,7 +112,7 @@ class MockMessageSession(MessageSession):
     async def delete(self, reason=None):
         self.action.append(f"(delete message{f': {reason}' if reason else ''})")
 
-    async def restrict_member(self, user_id, duration=None, reason=None):
+    async def restrict_member(self, user_id, duration=None, reason=None, wait=False):
         if isinstance(user_id, str):
             user_id = [user_id]
 
@@ -122,13 +120,15 @@ class MockMessageSession(MessageSession):
             self.action.append(
                 f"(restrict {x}{f' ({duration}s)' if duration else ''}{f': {reason}' if reason else ''})"
             )
+        return None if wait else f"mock-task-{len(self.action)}"
 
-    async def unrestrict_member(self, user_id):
+    async def unrestrict_member(self, user_id, wait=False):
         if isinstance(user_id, str):
             user_id = [user_id]
 
         for x in user_id:
             self.action.append(f"(unrestrict {x})")
+        return None if wait else f"mock-task-{len(self.action)}"
 
     async def kick_member(self, user_id, reason=None):
         if isinstance(user_id, str):
@@ -151,6 +151,22 @@ class MockMessageSession(MessageSession):
         for x in user_id:
             self.action.append(f"(unban {x})")
 
+    async def grant_permission_group(self, user_id, permission_group_id, reason=None, wait=False):
+        user_ids = [user_id] if isinstance(user_id, str) else user_id
+        permission_group_ids = [permission_group_id] if isinstance(permission_group_id, str) else permission_group_id
+        for uid in user_ids:
+            for group_id in permission_group_ids:
+                self.action.append(f"(grant permission group {group_id} to {uid}{f': {reason}' if reason else ''})")
+        return None if wait else f"mock-task-{len(self.action)}"
+
+    async def revoke_permission_group(self, user_id, permission_group_id, reason=None, wait=False):
+        user_ids = [user_id] if isinstance(user_id, str) else user_id
+        permission_group_ids = [permission_group_id] if isinstance(permission_group_id, str) else permission_group_id
+        for uid in user_ids:
+            for group_id in permission_group_ids:
+                self.action.append(f"(revoke permission group {group_id} from {uid}{f': {reason}' if reason else ''})")
+        return None if wait else f"mock-task-{len(self.action)}"
+
     async def add_reaction(self, emoji):
         self.action.append(f"(add reaction {emoji})")
 
@@ -159,6 +175,28 @@ class MockMessageSession(MessageSession):
 
     async def check_native_permission(self):
         return True
+
+    async def check_bot_state(self) -> BotState:
+        """Provide deterministic platform-state data to modules under the test parser."""
+        info = self.session_info
+        return BotState(
+            available=True,
+            joined=True,
+            is_owner=True,
+            is_admin=True,
+            can_read_messages=True,
+            can_read_all_messages=info.read_all_messages,
+            can_send_messages=True,
+            can_send_proactive_messages=True,
+            can_manage_messages=info.support_manage,
+            can_manage_members=info.support_manage,
+            can_restrict_members=info.support_manage,
+            can_react=info.support_reaction,
+            can_send_private_messages=info.support_private_msg,
+            raw={"platform": "test"},
+        )
+
+    checkBotState = check_bot_state
 
     async def handle_error_signal(self):
         pass
@@ -176,7 +214,15 @@ class MockMessageSession(MessageSession):
         pass
 
     async def wait_confirm(
-        self, message_chain=None, quote=True, delete=True, timeout=120, append_instruction=True, no_confirm_action=True
+        self,
+        message_chain=None,
+        quote=True,
+        delete=True,
+        timeout=120,
+        append_instruction=True,
+        no_confirm_action=True,
+        release_execution_lock=True,
+        consume_any_message=False,
     ):
         if CoreConfig.no_confirm:
             return no_confirm_action
@@ -187,6 +233,9 @@ class MockMessageSession(MessageSession):
             message_chain = MessageChain.assign(I18NContext("core.message.confirm"))
         if append_instruction:
             message_chain.append(I18NContext("message.wait.confirm.prompt"))
+        if self.session_info.support_button:
+            message_chain.append(Button(self.session_info.locale.t("message.button.yes"), "confirm_yes"))
+            message_chain.append(Button(self.session_info.locale.t("message.button.no"), "confirm_no"))
         await self.send_message(message_chain)
         try:
             confirm_prompt = "\n".join(
@@ -227,6 +276,10 @@ class MockMessageSession(MessageSession):
             message_chain = get_message_chain(self.session_info, message_chain)
             if append_instruction:
                 message_chain.append(I18NContext("message.wait.next_message.prompt"))
+            if possibly_choices and self.session_info.support_button:
+                for row in possibly_choices:
+                    for show, value in row.items():
+                        message_chain.append(Button(show, value))
             await self.send_message(message_chain, quote)
             confirm_prompt = "\n".join(
                 [x.text if isinstance(x, PlainElement) else str(x) for x in message_chain.as_sendable()]
@@ -313,7 +366,7 @@ class MockMessageSession(MessageSession):
         if message_chain:
             message_chain = get_message_chain(self.session_info, message_chain)
             if append_instruction:
-                message_chain.append(I18NContext("message.reply.prompt"))
+                message_chain.append(I18NContext("message.wait.reply.prompt"))
             await self.send_message(message_chain, quote)
             confirm_prompt = "\n".join(
                 [x.text if isinstance(x, PlainElement) else str(x) for x in message_chain.as_sendable()]

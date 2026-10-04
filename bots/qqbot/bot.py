@@ -1,25 +1,34 @@
-import asyncio
 import re
+import time
+from collections import OrderedDict
+from collections.abc import Mapping
+from functools import wraps
 
 import botpy
 from botpy.interaction import Interaction
-from botpy.message import C2CMessage, DirectMessage, GroupMessage, Message
+from botpy.manage import GroupMemberEvent
+from botpy.message import C2CMessage, DirectMessage, GroupMessage, Message, BaseMessage
 
-from bots.qqbot.context import QQBotContextManager, QQBotFetchedContextManager, permission_cache
+from bots.qqbot.config import QQBotConfig, QQBotSecretConfig
+from bots.qqbot.context import QQBotContextManager, QQBotFetchedContextManager, cache_message_id_pair, cache_permission
 from bots.qqbot.info import *
 from bots.qqbot.features import group_disable_read_all_message_features, resolve_features, guild_features
+from bots.qqbot.navigation import build_navigation
 from core.builtins.bot import Bot
 from core.builtins.message.chain import MessageChain
-from core.builtins.message.internal import Plain
-from core.builtins.session.info import SessionInfo
+from core.builtins.message.elements import ButtonPayload
+from core.builtins.message.internal import Plain, Image, Audio, Video, Raw
+from core.builtins.session.info import EventInfo, SessionInfo
 from core.builtins.utils import command_prefix
-from core.client.init import client_init
-from bots.qqbot.config import QQBotConfig, QQBotSecretConfig
+from core.client.init import client_cleanup, client_init
 from core.config.base import CoreConfig
+from core.config.network import proxy, ssl_verify
 from core.constants.default import confirm_command_default
 from core.logger import Logger
+from core.utils.button_runtime import BUTTON_TOKEN_PREFIX, ButtonConsumeStatus, consume_button
 
 Bot.register_bot(client_name=client_name)
+Logger.rename(client_name)
 ctx_id = Bot.register_context_manager(QQBotContextManager)
 Bot.register_context_manager(QQBotFetchedContextManager, fetch_session=True)
 
@@ -29,32 +38,190 @@ qqbot_secret = QQBotSecretConfig.qq_bot_secret
 ignored_sender = CoreConfig.ignored_sender
 
 initialized = False
+INBOUND_MESSAGE_CACHE_TTL = 300
+INBOUND_MESSAGE_CACHE_MAX_SIZE = 4096
+_inbound_message_cache: OrderedDict[tuple[str, ...], float] = OrderedDict()
+_ignored_msg_startswith = [
+    re.compile(r"^\[.*?聊天记录]\n.*"),
+    re.compile(r"^\[卡片消息].*"),
+]  # 暂不解析这些消息，没有实际用途
+
+
+def _inbound_message_key(message) -> tuple[str, ...] | None:
+    message_id = getattr(message, "id", None)
+    if not message_id:
+        return None
+    if group_id := getattr(message, "group_openid", None):
+        return "group", str(group_id), str(message_id)
+    if isinstance(message, DirectMessage):
+        return "dm", str(message.guild_id), str(message_id)
+    if channel_id := getattr(message, "channel_id", None):
+        return "channel", str(getattr(message, "guild_id", "")), str(channel_id), str(message_id)
+    if guild_id := getattr(message, "guild_id", None):
+        return "dm", str(guild_id), str(message_id)
+    if user_id := getattr(getattr(message, "author", None), "user_openid", None):
+        return "c2c", str(user_id), str(message_id)
+    return None
+
+
+def _deduplicate_message(handler):
+    @wraps(handler)
+    async def wrapped(message):
+        key = _inbound_message_key(message)
+        if key is None:
+            return await handler(message)
+        now = time.monotonic()
+        while _inbound_message_cache:
+            if now - next(iter(_inbound_message_cache.values())) < INBOUND_MESSAGE_CACHE_TTL:
+                break
+            _inbound_message_cache.popitem(last=False)
+        if key in _inbound_message_cache:
+            Logger.info(f"Skipped duplicate QQBot message: callback={handler.__name__} identity={key}")
+            return
+        # 去重须在首个 await 前认领，且普通消息与提及回调共用同一消息身份。
+        _inbound_message_cache[key] = now
+        while len(_inbound_message_cache) > INBOUND_MESSAGE_CACHE_MAX_SIZE:
+            _inbound_message_cache.popitem(last=False)
+        try:
+            return await handler(message)
+        except BaseException:
+            if _inbound_message_cache.get(key) == now:
+                _inbound_message_cache.pop(key, None)
+            raise
+
+    return wrapped
+
+
+def _message_application_ids(message) -> tuple[str | None, str | None]:
+    application_id = None
+    reply_id = None
+    # QQ 官方 SDK 中该字段名为 message_scene。
+    message_context = getattr(message, "message_scene", None)
+    if isinstance(message_context, Mapping):
+        ext = message_context.get("ext") or []
+        for item in ext:
+            if not isinstance(item, str):
+                continue
+            key, separator, value = item.partition("=")
+            if not separator or not value:
+                continue
+            if key == "msg_idx":
+                application_id = value
+            elif key == "ref_msg_idx":
+                reply_id = value
+
+    if reply_id is None:
+        reference = getattr(message, "message_reference", None)
+        reply_id = getattr(reference, "message_id", None)
+    return application_id, reply_id
+
+
+def _record_message_ids(message) -> str | None:
+    application_id, reply_id = _message_application_ids(message)
+    cache_message_id_pair(application_id, getattr(message, "id", None))
+    return reply_id
+
+
+def _convert_message_content(message: BaseMessage | Message | DirectMessage) -> MessageChain:
+    for ig in _ignored_msg_startswith:
+        if ig.match(message.content):
+            return MessageChain.assign(Raw(message.content))
+
+    msg_chain = MessageChain.assign(message.content)
+
+    for attachment in message.attachments:
+        content_type = attachment.content_type
+        if content_type.startswith("image"):
+            msg_chain.append(Image(attachment.url))
+        if content_type.startswith("voice"):
+            msg_chain.append(Audio(attachment.url))
+        if content_type.startswith("video"):
+            msg_chain.append(Video(attachment.url))
+    return msg_chain
 
 
 class MyClient(botpy.Client):
-    async def on_ready(self):
+    async def close(self) -> None:
         global initialized
-        if not initialized:
-            await client_init(target_prefix_list, sender_prefix_list)
-            asyncio.create_task(QQBotFetchedContextManager.process_tasks())
-            initialized = True
+        try:
+            await QQBotFetchedContextManager.stop_task_processor()
+        finally:
+            try:
+                await QQBotContextManager.shutdown()
+            finally:
+                try:
+                    await client_cleanup()
+                finally:
+                    initialized = False
+                    await super().close()
 
     @staticmethod
+    async def on_group_member_add(event: GroupMemberEvent):
+        """将 QQ 官方机器人群成员加入事件转换为核心事件。"""
+        member_openid = getattr(event, "member_openid", None) or getattr(event, "user_openid", None)
+        group_openid = getattr(event, "group_openid", None)
+        if not member_openid or not group_openid:
+            Logger.warning(f"Incomplete QQBot group_member_add event: {event}")
+            return
+        Logger.debug(event)
+
+        event_info = await EventInfo.assign(
+            event_name="member_joined",
+            target_id=f"{target_group_prefix}|{group_openid}",
+            target_from=target_group_prefix,
+            client_name=client_name,
+            sender_id=f"{sender_prefix}|{member_openid}",
+            sender_from=sender_prefix,
+            data={"event_id": event.event_id, "timestamp": event.timestamp},
+        )
+        await Bot.process_event(event_info)
+
+    @staticmethod
+    async def on_group_member_remove(event: GroupMemberEvent):
+        """将 QQ 官方机器人群成员退出事件转换为核心事件。"""
+        member_openid = getattr(event, "member_openid", None) or getattr(event, "user_openid", None)
+        group_openid = getattr(event, "group_openid", None)
+        if not member_openid or not group_openid:
+            Logger.warning(f"Incomplete QQBot group_member_remove event: {event}")
+            return
+        Logger.debug(event)
+
+        event_info = await EventInfo.assign(
+            event_name="member_left",
+            target_id=f"{target_group_prefix}|{group_openid}",
+            target_from=target_group_prefix,
+            client_name=client_name,
+            sender_id=f"{sender_prefix}|{member_openid}",
+            sender_from=sender_prefix,
+            data={"event_id": event.event_id, "timestamp": event.timestamp},
+        )
+        await Bot.process_event(event_info)
+
+    async def on_ready(self):
+        global initialized
+        QQBotContextManager.prepare_start()
+        if not initialized:
+            await client_init(target_prefix_list, sender_prefix_list, rename_logger=False)
+            initialized = True
+        QQBotFetchedContextManager.start_task_processor()
+
+    @staticmethod
+    @_deduplicate_message
     async def on_at_message_create(message: Message):
         target_id = f"{target_guild_prefix}|{message.guild_id}|{message.channel_id}"
         sender_id = f"{sender_tiny_prefix}|{message.author.id}"
         if sender_id in ignored_sender:
             return
 
-        reply_id = None
-        if message.message_reference:
-            reply_id = message.message_reference.message_id
+        reply_id = _record_message_ids(message)
 
-        message.content = re.sub(r"<@(.*?)>", "", message.content).strip()
-        if not message.content:
+        pure_content = re.sub(r"<@(.*?)>", "", message.content).strip()
+        if not pure_content:
             message.content = f"{command_prefix[0]}help"
 
-        msg_chain = MessageChain.assign(re.sub(r"<@(.*?)>", rf"{sender_tiny_prefix}|\1", message.content))
+        message.content = re.sub(r"<@(.*?)>", rf"{sender_tiny_prefix}|\1", message.content)
+
+        msg_chain = _convert_message_content(message)
 
         session = await SessionInfo.assign(
             target_id=target_id,
@@ -75,28 +242,24 @@ class MyClient(botpy.Client):
         await Bot.process_message(session, message, guild_features)
 
     @staticmethod
+    @_deduplicate_message
     async def on_message_create(message: Message):
         target_id = f"{target_guild_prefix}|{message.guild_id}|{message.channel_id}"
         sender_id = f"{sender_tiny_prefix}|{message.author.id}"
         if sender_id in ignored_sender:
             return
 
-        reply_id = None
-        if message.message_reference:
-            reply_id = message.message_reference.message_id
+        reply_id = _record_message_ids(message)
 
-        match_atme = False
+        pure_content = re.sub(r"<@(.*?)>", "", message.content).strip()
+        if not pure_content:
+            message.content = f"{command_prefix[0]}help"
 
-        if qqbot_openid:
-            if m := re.match(r"<@(.*?)>(.*)", message.content):
-                if m.group(1) == qqbot_openid:
-                    match_atme = True
-                    message.content = m.group(2).strip()
-                    if not message.content:
-                        message.content = f"{command_prefix[0]}help"
+        message.content = re.sub(r"<@(.*?)>", rf"{sender_tiny_prefix}|\1", message.content)
 
-        msg_chain = MessageChain.assign(re.sub(r"<@(.*?)>", rf"{sender_tiny_prefix}|\1", message.content))
-        prefixes = [] if not match_atme else ["/"]
+        msg_chain = _convert_message_content(message)
+
+        prefixes = []
 
         session = await SessionInfo.assign(
             target_id=target_id,
@@ -111,12 +274,17 @@ class MyClient(botpy.Client):
             ctx_slot=ctx_id,
             prefixes=prefixes,
             bot_id=qqbot_openid,
-            tmp={"message_type": "guild_direct"},
+            tmp={
+                "message_type": "guild_direct",
+                "qq_bot_uid": QQBotConfig.qq_bot_uid,
+                "qq_bot_qqnum": QQBotConfig.qq_bot_qqnum,
+            },
         )
 
         await Bot.process_message(session, message, guild_features)
 
     @staticmethod
+    @_deduplicate_message
     async def on_message_group_create(message: GroupMessage):
         Logger.debug(message)
         target_id = f"{target_group_prefix}|{message.group_openid}"
@@ -124,20 +292,20 @@ class MyClient(botpy.Client):
         if sender_id in ignored_sender:
             return
 
-        reply_id = None
-        if message.mentions:
-            reply_id = message.mentions[0].id
+        reply_id = _record_message_ids(message)
 
         match_atme = False
 
         if qqbot_openid:
-            if m := re.match(r"<@(.*?)>(.*)", message.content):
+            if m := re.match(r"^<@(.*?)>(.*)", message.content):
                 if m.group(1) == qqbot_openid:
                     match_atme = True
                     message.content = m.group(2).strip()
                     if not message.content:
                         message.content = f"{command_prefix[0]}help"
-        msg_chain = MessageChain.assign(re.sub(r"<@(.*?)>", rf"{sender_prefix}|\1", message.content))
+        message.content = re.sub(r"<@(.*?)>", rf"{sender_prefix}|\1", message.content)
+
+        msg_chain = _convert_message_content(message)
         prefixes = [] if not match_atme else ["/"]
         session = await SessionInfo.assign(
             target_id=target_id,
@@ -152,14 +320,19 @@ class MyClient(botpy.Client):
             ctx_slot=ctx_id,
             prefixes=prefixes,
             bot_id=qqbot_openid,
-            tmp={"message_type": "group_direct"},
+            tmp={
+                "message_type": "group_direct",
+                "qq_bot_uid": QQBotConfig.qq_bot_uid,
+                "qq_bot_qqnum": QQBotConfig.qq_bot_qqnum,
+            },
         )
 
-        permission_cache[f"{target_id}|{sender_id}"] = message.author.member_role in ["admin", "owner"]
+        cache_permission(f"{target_id}|{sender_id}", message.author.member_role in ["admin", "owner"])
 
         await Bot.process_message(session, message, resolve_features(session))
 
     @staticmethod
+    @_deduplicate_message
     async def on_group_at_message_create(message: GroupMessage):
 
         target_id = f"{target_group_prefix}|{message.group_openid}"
@@ -167,15 +340,14 @@ class MyClient(botpy.Client):
         if sender_id in ignored_sender:
             return
 
-        reply_id = None
-        if message.message_reference:
-            reply_id = message.message_reference.message_id
+        reply_id = _record_message_ids(message)
 
-        message.content = re.sub(r"<@(.*?)>", "", message.content).strip()
+        message.content = re.sub(r"^<@(.*?)>", "", message.content).strip()
         if not message.content:
             message.content = f"{command_prefix[0]}help"
 
-        msg_chain = MessageChain.assign(re.sub(r"<@(.*?)>", rf"{sender_prefix}|\1", message.content))
+        message.content = re.sub(r"<@(.*?)>", rf"{sender_prefix}|\1", message.content)
+        msg_chain = _convert_message_content(message)
 
         session = await SessionInfo.assign(
             target_id=target_id,
@@ -190,14 +362,19 @@ class MyClient(botpy.Client):
             ctx_slot=ctx_id,
             prefixes=["/"],
             bot_id=qqbot_openid,
-            tmp={"message_type": "group_at"},
+            tmp={
+                "message_type": "group_at",
+                "qq_bot_uid": QQBotConfig.qq_bot_uid,
+                "qq_bot_qqnum": QQBotConfig.qq_bot_qqnum,
+            },
         )
 
-        permission_cache[f"{target_id}|{sender_id}"] = message.author.member_role in ["admin", "owner"]
+        cache_permission(f"{target_id}|{sender_id}", message.author.member_role in ["admin", "owner"])
 
         await Bot.process_message(session, message, resolve_features(session, group_disable_read_all_message_features))
 
     @staticmethod
+    @_deduplicate_message
     async def on_direct_message_create(message: DirectMessage):
 
         target_id = f"{target_direct_prefix}|{message.guild_id}"
@@ -205,11 +382,10 @@ class MyClient(botpy.Client):
         if sender_id in ignored_sender:
             return
 
-        reply_id = None
-        if message.message_reference:
-            reply_id = message.message_reference.message_id
+        reply_id = _record_message_ids(message)
 
-        msg_chain = MessageChain.assign(message.content)
+        message.content = re.sub(r"<@(.*?)>", rf"{sender_prefix}|\1", message.content)
+        msg_chain = _convert_message_content(message)
 
         session = await SessionInfo.assign(
             target_id=target_id,
@@ -225,22 +401,23 @@ class MyClient(botpy.Client):
             ctx_slot=ctx_id,
             prefixes=["/"],
             bot_id=qqbot_openid,
+            tmp={"qq_bot_uid": QQBotConfig.qq_bot_uid, "qq_bot_qqnum": QQBotConfig.qq_bot_qqnum},
         )
 
         await Bot.process_message(session, message, guild_features)
 
     @staticmethod
+    @_deduplicate_message
     async def on_c2c_message_create(message: C2CMessage):
         target_id = f"{target_c2c_prefix}|{message.author.user_openid}"
         sender_id = f"{sender_prefix}|{message.author.user_openid}"
         if sender_id in ignored_sender:
             return
 
-        reply_id = None
-        if message.message_reference:
-            reply_id = message.message_reference.message_id
+        reply_id = _record_message_ids(message)
 
-        msg_chain = MessageChain.assign(message.content)
+        message.content = re.sub(r"<@(.*?)>", rf"{sender_prefix}|\1", message.content)
+        msg_chain = _convert_message_content(message)
 
         session = await SessionInfo.assign(
             target_id=target_id,
@@ -256,6 +433,7 @@ class MyClient(botpy.Client):
             ctx_slot=ctx_id,
             prefixes=["/"],
             bot_id=qqbot_openid,
+            tmp={"qq_bot_uid": QQBotConfig.qq_bot_uid, "qq_bot_qqnum": QQBotConfig.qq_bot_qqnum},
         )
 
         await Bot.process_message(session, message, resolve_features(session))
@@ -263,7 +441,11 @@ class MyClient(botpy.Client):
     @staticmethod
     async def on_interaction_create(interaction: Interaction):
         Logger.debug(interaction)
-        await client.api.on_interaction_result(interaction.id, 0)
+        await interaction.acknowledge()
+        send_msg = interaction.data.resolved.button_data
+        if not send_msg:
+            Logger.warning(f"Unsupported QQBot interaction payload: {interaction}")
+            return
         if interaction.chat_type == 0:
             target_id = f"{target_guild_prefix}|{interaction.guild_id}|{interaction.channel_id}"
             sender_id = f"{sender_tiny_prefix}|{interaction.user_openid}"
@@ -284,13 +466,15 @@ class MyClient(botpy.Client):
             return
         if sender_id in ignored_sender:
             return
-        send_msg = interaction.data.resolved.button_data
-        quote_msg = None
-        match_quote = re.match(r"<q:(.*?)>(.*)", send_msg)
-
-        if match_quote:
-            quote_msg = match_quote.group(1)
-            send_msg = match_quote.group(2)
+        # QQBot 的交互事件不会可靠返回按钮所属消息的 ID；发送阶段把框架生成的虚拟
+        # reply_id 编进 button data，此处恢复后即可复用 SessionTaskManager 的 callback 匹配。
+        if send_msg.startswith(BUTTON_TOKEN_PREFIX):
+            result = consume_button(send_msg, sender_id)
+            if result.status is not ButtonConsumeStatus.SUCCESS:
+                Logger.debug(f"QQBot button click rejected: {result.status.name}")
+                return
+            payload = ButtonPayload.parse(result.payload or "", result.reply_id)
+        send_msg = payload.value
         if send_msg == "confirm_yes":
             send_msg = confirm_command_default[0]
         elif send_msg == "confirm_no":
@@ -303,7 +487,10 @@ class MyClient(botpy.Client):
             is_private=target_from in (target_c2c_prefix, target_direct_prefix),
             sender_from=sender_from,
             client_name=client_name,
-            reply_id=interaction.data.resolved.message_id if quote_msg is None else quote_msg,
+            message_id=None,
+            reply_id=payload.reply_id
+            or str(getattr(getattr(interaction.data, "resolved", None), "message_id", ""))
+            or None,
             messages=MessageChain.assign([Plain(send_msg)]),
             ctx_slot=ctx_id,
             bot_id=qqbot_openid,
@@ -311,16 +498,45 @@ class MyClient(botpy.Client):
         await Bot.process_message(session, interaction, resolve_features(session))
 
 
-intents = botpy.Intents.none()
-intents.public_guild_messages = True
-intents.public_messages = True
-intents.direct_message = True
-intents.interaction = True
-if QQBotConfig.qq_private_bot:
-    intents.guild_messages = True
+def _build_client() -> MyClient:
+    intents = botpy.Intents.none()
+    intents.public_guild_messages = True
+    intents.public_messages = True
+    intents.direct_message = True
+    intents.interaction = True
+    intents.group_member_event = True
+    if QQBotConfig.qq_private_bot:
+        intents.guild_messages = True
 
-client = MyClient(intents=intents, bot_log=None)
+    # Webhook 模式由平台回调驱动，须在本机监听；SDK 只提供 HTTP，公网 HTTPS 交由反向代理终止。
+    transport_options: dict[str, object] = {"transport": "websocket"}
+    if QQBotConfig.qq_use_webhook:
+        transport_options = {
+            "transport": "webhook",
+            "webhook_host": str(QQBotConfig.qq_webhook_host),
+            "webhook_port": int(QQBotConfig.qq_webhook_port),
+            "webhook_path": str(QQBotConfig.qq_webhook_path),
+        }
+    if QQBotConfig.qq_api_url:
+        transport_options["base_url"] = QQBotConfig.qq_api_url
+
+    menu, panels = build_navigation()
+    return MyClient(
+        intents=intents,
+        bot_log=None,
+        loguru_logger=Logger.log,
+        menu=menu,
+        panels=panels,
+        config_sync_strict=QQBotConfig.qq_navigation_sync_strict,
+        proxy=proxy,
+        ssl=ssl_verify,
+        rate_limit={"certification": "certified" if QQBotConfig.qq_bot_certified else "unverified"},
+        **transport_options,
+    )
+
+
+client = _build_client()
+QQBotContextManager.client = client
 
 if QQBotConfig.enable:
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(client.start(appid=qqbot_appid, secret=qqbot_secret))
+    client.run(appid=qqbot_appid, secret=qqbot_secret)

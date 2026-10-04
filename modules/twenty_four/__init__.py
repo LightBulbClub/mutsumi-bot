@@ -3,9 +3,9 @@ from simpleeval import simple_eval
 from core.builtins.bot import Bot
 from core.builtins.message.internal import I18NContext, Plain
 from core.component import module
-from core.game import PlayState, GAME_EXPIRED
-from core.utils.func import is_int
+from core.utils.game import PlayState, GAME_EXPIRED
 from core.utils.petal import cost_petal, gained_petal, lost_petal
+from core.utils.func import is_int
 from core.utils.random import Random
 
 no_solution_lst = [
@@ -156,8 +156,8 @@ def find_solution(numbers):
 
 
 tf = module(
-    "twenty_four",
-    alias=["twentyfour", "24"],
+    "twenty-four",
+    alias=["twenty_four", "twentyfour", "24"],
     desc="{I18N:twenty_four.help.desc}",
     developers=["DoroWolf"],
     doc=True,
@@ -170,39 +170,39 @@ async def _(msg: Bot.MessageSession):
     if play_state.check():
         await msg.finish(I18NContext("game.message.running"))
 
-    play_state.enable()
-    numbers = tuple(Random.randint(1, 13) for _ in range(4))
-    play_state.update(numbers=numbers)
-    solution = find_solution(numbers)
+    with play_state.running():
+        numbers = tuple(Random.randint(1, 13) for _ in range(4))
+        play_state.update(numbers=numbers)
+        solution = find_solution(numbers)
 
-    answer = await msg.wait_next_message(I18NContext("twenty_four.message", numbers=numbers), timeout=GAME_EXPIRED)
-    expr = answer.as_display(text_only=True)
-    if play_state.check():
-        play_state.disable()
-        if expr.lower() in no_solution_lst:
-            if solution:
-                solution = solution[0]
-                if msg.session_info.support_markdown:
-                    solution.replace("*", "\\*")
-                send = [I18NContext("twenty_four.message.incorrect.have_solution", solution=solution)]
-                if g_msg := (g_msg := await lost_petal(msg, 1)):
-                    send.append(g_msg)
-            else:
-                send = [I18NContext("twenty_four.message.correct")]
-                if g_msg := await gained_petal(msg, 1):
-                    send.append(g_msg)
-            await answer.finish(send)
-        if check_valid(expr):
-            result = calc(expr)
-            if result is None:
-                await answer.finish(I18NContext("twenty_four.message.incorrect.invalid"))
-            elif abs(result - 24) < 1e-10 and contains_all_numbers(expr, numbers):
-                send = [I18NContext("twenty_four.message.correct")]
-                if g_msg := await gained_petal(msg, 1):
-                    send.append(g_msg)
+        answer = await msg.wait_next_message(I18NContext("twenty_four.message", numbers=numbers), timeout=GAME_EXPIRED)
+        expr = answer.as_display(text_only=True)
+        if play_state.check():
+            play_state.disable()
+            if expr.lower() in no_solution_lst:
+                if solution:
+                    solution = solution[0]
+                    if msg.session_info.support_markdown:
+                        solution.replace("*", "\\*")
+                    send = [I18NContext("twenty_four.message.incorrect.have_solution", solution=solution)]
+                    if g_msg := (g_msg := await lost_petal(msg, 1)):
+                        send.append(g_msg)
+                else:
+                    send = [I18NContext("twenty_four.message.correct")]
+                    if g_msg := await gained_petal(msg, 1):
+                        send.append(g_msg)
                 await answer.finish(send)
-            await answer.finish(I18NContext("twenty_four.message.incorrect"))
-        await answer.finish(I18NContext("twenty_four.message.incorrect.invalid"))
+            if check_valid(expr):
+                result = calc(expr)
+                if result is None:
+                    await answer.finish(I18NContext("twenty_four.message.incorrect.invalid"))
+                elif abs(result - 24) < 1e-10 and contains_all_numbers(expr, numbers):
+                    send = [I18NContext("twenty_four.message.correct")]
+                    if g_msg := await gained_petal(msg, 1):
+                        send.append(g_msg)
+                    await answer.finish(send)
+                await answer.finish(I18NContext("twenty_four.message.incorrect"))
+            await answer.finish(I18NContext("twenty_four.message.incorrect.invalid"))
 
 
 @tf.command("stop {{I18N:game.help.stop}}")

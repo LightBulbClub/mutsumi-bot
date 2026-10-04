@@ -1,4 +1,4 @@
-from core import check_python_version  # skipcq
+from core.version import check_python_version  # skipcq
 
 check_python_version()  # noqa
 
@@ -19,23 +19,17 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from loguru import logger
-from tortoise import Tortoise, run_async
 
-from core.constants import ascii_art, bots_path, logs_path  # skipcq
-from core.database import close_db
-from core.config import CONFIG_READONLY_ENV
+from core.constants import CONFIG_READONLY_ENV, ascii_art, bots_path, logs_path  # skipcq
 
+
+AKARI_BOT_I18N_CACHE_DIR = str(Path("./data/i18n_cache/").resolve())
 
 load_dotenv()
 os.environ.setdefault("PYTHONIOENCODING", "UTF-8")
 os.environ.setdefault("PYTHONPATH", str(Path(".").resolve()))
+os.environ.setdefault("AKARI_BOT_I18N_CACHE_DIR", AKARI_BOT_I18N_CACHE_DIR)
 
-
-# Basic logger setup
-try:
-    logger.remove(0)
-except ValueError:
-    pass
 
 Logger = logger.bind(name="BotDaemon")
 
@@ -45,28 +39,48 @@ logger_format = (
     "<green>[{time:YYYY-MM-DD HH:mm:ss}]</green>"
     "<level>[{level}]:{message}</level>"
 )
-Logger.add(
-    sys.stdout, format=logger_format, colorize=True, filter=lambda record: record["extra"].get("name") == "BotDaemon"
-)
+_daemon_logger_initialized = False
 
-Logger.add(
-    sink=logs_path / "BotDaemon_debug_{time:YYYY-MM-DD}.log",
-    format=logger_format,
-    rotation="00:00",
-    retention="1 day",
-    level="DEBUG",
-    filter=lambda record: record["level"].name == "DEBUG" and record["extra"].get("name") == "BotDaemon",
-    encoding="utf8",
-)
-Logger.add(
-    sink=logs_path / "BotDaemon_{time:YYYY-MM-DD}.log",
-    format=logger_format,
-    rotation="00:00",
-    retention="10 days",
-    level="INFO",
-    encoding="utf8",
-    filter=lambda record: record["extra"].get("name") == "BotDaemon",
-)
+
+def _is_daemon_log(record):
+    """守护进程自身及尚未重命名的核心日志均写入 BotDaemon。"""
+    return record["extra"].get("name") in {None, "BotDaemon"}
+
+
+def init_daemon_logger():
+    """仅为守护进程与短生命周期 pre-init 进程安装日志处理器。"""
+    global _daemon_logger_initialized
+    if _daemon_logger_initialized:
+        return
+    try:
+        logger.remove(0)
+    except ValueError:
+        pass
+    Logger.add(
+        sys.stdout,
+        format=logger_format,
+        colorize=True,
+        filter=_is_daemon_log,
+    )
+    Logger.add(
+        sink=logs_path / "BotDaemon_debug_{time:YYYY-MM-DD}.log",
+        format=logger_format,
+        rotation="00:00",
+        retention="1 day",
+        level="DEBUG",
+        filter=lambda record: record["level"].name == "DEBUG" and _is_daemon_log(record),
+        encoding="utf8",
+    )
+    Logger.add(
+        sink=logs_path / "BotDaemon_{time:YYYY-MM-DD}.log",
+        format=logger_format,
+        rotation="00:00",
+        retention="10 days",
+        level="INFO",
+        encoding="utf8",
+        filter=_is_daemon_log,
+    )
+    _daemon_logger_initialized = True
 
 
 class RestartBot(Exception):
@@ -76,25 +90,54 @@ class RestartBot(Exception):
 failed_to_start_attempts = {}
 disabled_bots = []
 processes: list[multiprocessing.Process] = []
+server_stop_event = None
+jobqueue_hub_stop_event = None
+
+
+def warn_if_database_jobqueue_uses_sqlite(jobqueue_backend: object, database_type: object) -> bool:
+    """数据库队列与 SQLite 组合使用时输出一次非阻断警告。"""
+    if not isinstance(jobqueue_backend, str) or jobqueue_backend.strip().lower() != "database":
+        return False
+    if not isinstance(database_type, str) or database_type.strip().lower() != "sqlite":
+        return False
+    Logger.warning(
+        "JobQueue is using the database backend with SQLite. SQLite permits only one concurrent writer; "
+        "JobQueue delivery, claim, heartbeat, response, and cleanup writes will contend with application data "
+        'and may cause "database is locked" errors under load. Set [jobqueue].jobqueue_backend = "websocket" '
+        "in config/jobqueue.toml to move JobQueue traffic off SQLite."
+    )
+    return True
 
 
 def pre_init():
+    init_daemon_logger()
     Logger.info(ascii_art)
     Logger.info("Akaribot is launching...")
-    from core.constants.path import cache_path
+    from tortoise import run_async
+
+    from core.constants import all_locales_path, cache_path, lang_list
+    from core.i18n import build_locale_snapshot, connect_locale_snapshot
 
     if cache_path.exists():
         shutil.rmtree(cache_path)
     cache_path.mkdir(parents=True, exist_ok=True)
 
+    Logger.info("Loading i18n...")
+    locale_loaded_err = build_locale_snapshot(list(lang_list.keys()), all_locales_path, "akari-bot")
+    connect_locale_snapshot("akari-bot")
+    if locale_loaded_err:
+        Logger.warning(f"I18N loaded with errors: {locale_loaded_err}")
+
     Logger.info("Generating config...")
 
     # CoreConfig 的导入须留在函数内：multiprocessing 以 spawn / forkserver 启动子进程时
     # 会以 __mp_main__ 重新导入主模块，置于顶层将使每个子进程再次触发配置模板的生成。
-    from core.config.base import CoreConfig
+    from core.config.core import CoreConfig
+    from core.config.jobqueue import bootstrap_jobqueue_config, JobQueueConfig
     from core.config.scan import scan_config_templates
     from core.constants.version import database_version
-    from core.database.link import get_db_link
+    from core.database import close_db, init_db
+    from core.database.link import db_type
     from core.database.models import SenderUnionInfo, DBVersion
 
     # 配置的生成集中在此完成：子进程一律只读，此处遗漏的键将在子进程读取时抛出异常，
@@ -104,13 +147,19 @@ def pre_init():
         Logger.critical(f"Failed to load config templates: {failed_templates}. Aborting.")
         sys.exit(1)
 
+    generated_jobqueue_fields = bootstrap_jobqueue_config()
+    if generated_jobqueue_fields:
+        Logger.info("Generated and saved missing JobQueue configuration values.")
+
+    warn_if_database_jobqueue_uses_sqlite(JobQueueConfig.jobqueue_backend, db_type)
+
     if CoreConfig.debug:
         Logger.debug("Debug mode is enabled.")
 
     async def update_db():
         Logger.info("Checking database...")
-        await Tortoise.init(db_url=get_db_link(), modules={"models": ["core.database.models"]})
-        await Tortoise.generate_schemas(safe=True)
+        if not await init_db(generate_schemas=True):
+            raise RuntimeError("Failed to initialize database schemas during pre-init.")
 
         Logger.info("Verifying database version...")
 
@@ -139,7 +188,8 @@ def pre_init():
         if base_superuser:
             if isinstance(base_superuser, str):
                 base_superuser = [base_superuser]
-            await Tortoise.init(db_url=get_db_link(), modules={"models": ["core.database.models"]})
+            if not await init_db(load_module_db=False):
+                raise RuntimeError("Failed to initialize database while granting base superuser permission.")
             for bu in base_superuser:
                 sender_info = await SenderUnionInfo.resolve_union(bu)
                 await sender_info.edit_attr("superuser", True)
@@ -187,23 +237,74 @@ def go(bot_name: str, subprocess: bool = False, binary_mode: bool = False):
         sys.exit(1)
 
 
-async def cleanup_tasks():
-    loop = asyncio.get_event_loop()
-    asyncio.all_tasks(loop=loop)
+def server_go(
+    stop_event,
+    subprocess: bool = False,
+    binary_mode: bool = False,
+    daemon_pid: int | None = None,
+    hub_pid: int | None = None,
+):
+    # Server 依赖树（尤其 WebRender）只应由 Server 子进程加载，守护进程不需要保留一份。
+    from core.server.run import run_async
+
+    run_async(subprocess, binary_mode, stop_event, daemon_pid, hub_pid)
+
+
+def jobqueue_hub_go(stop_event, ready_event):
+    """在独立子进程中运行内置 WebSocket JobQueue Hub。"""
+    from core.queue.websocket import run_websocket_hub_process
+
+    run_websocket_hub_process(stop_event, ready_event)
 
 
 binary_mode = not sys.argv[0].endswith(".py")
 
 
 async def run_bot():
-    from core.config import CFGManager
-    from core.server.run import run_async as server_run_async
+    global server_stop_event, jobqueue_hub_stop_event
 
     # 自此起 spawn 出的子进程一律只读：配置的生成已在 pre_init 中完成。
     # 须在任何 mp.Process 之前置位，spawn 会继承环境；restart_bot_process() 后续重启子进程时同样适用。
     os.environ[CONFIG_READONLY_ENV] = "1"
+    os.environ["AKARI_BOT_I18N_CACHE_DIR"] = AKARI_BOT_I18N_CACHE_DIR
+
+    # CONFIG_READONLY_ENV 必须先于 core.config 的首次导入置位；后者会在导入期执行配置版本迁移。
+    from core.config import CFGManager
+    from core.config.jobqueue import JobQueueConfig
 
     mp = multiprocessing.get_context("spawn" if sys.platform in ["win32", "darwin"] else "forkserver")
+    # 守护进程与 Hub 非 JobQueue Peer，Server 无从 Registry 获知其 PID。此处随 Process
+    # 参数传递而非环境变量：forkserver 于首个子进程启动时快照环境，后续改动不再生效。
+    hub_pid = None
+
+    if JobQueueConfig.jobqueue_backend.strip().lower() == "websocket":
+        from core.queue.websocket import WebSocketSettings
+
+        websocket_settings = WebSocketSettings.from_config()
+    else:
+        websocket_settings = None
+
+    if websocket_settings is not None and websocket_settings.embedded:
+        jobqueue_hub_stop_event = mp.Event()
+        hub_ready_event = mp.Event()
+        hub_process = mp.Process(
+            target=jobqueue_hub_go,
+            args=(jobqueue_hub_stop_event, hub_ready_event),
+            name="jobqueue-hub",
+            daemon=True,
+        )
+        hub_process.start()
+        processes.append(hub_process)
+        hub_ready = await asyncio.to_thread(hub_ready_event.wait, 10)
+        if not hub_ready or not hub_process.is_alive():
+            exitcode = hub_process.exitcode
+            Logger.critical(f"WebSocket JobQueue Hub failed to start, exit code: {exitcode}.")
+            terminate_process(hub_process, jobqueue_hub_stop_event)
+            processes.remove(hub_process)
+            jobqueue_hub_stop_event = None
+            raise RuntimeError("Failed to start the WebSocket JobQueue Hub")
+        Logger.success("WebSocket JobQueue Hub is ready.")
+        hub_pid = hub_process.pid
 
     def restart_bot_process(bot_name: str):
         if (
@@ -234,6 +335,7 @@ async def run_bot():
         processes.append(p)
 
     bots_list = [p.name for p in bots_path.iterdir() if p.is_dir() and not p.name.startswith("_")]
+    disabled_bots.clear()
 
     for t in CFGManager.values:
         if t.startswith("bot_") and not t.endswith("_secret") and t[4:] in bots_list:
@@ -253,7 +355,13 @@ async def run_bot():
         processes.append(p)
 
     # run the server process
-    server_process = mp.Process(target=server_run_async, args=(True, binary_mode), name="server", daemon=True)
+    server_stop_event = mp.Event()
+    server_process = mp.Process(
+        target=server_go,
+        args=(server_stop_event, True, binary_mode, os.getpid(), hub_pid),
+        name="server",
+        daemon=True,
+    )
 
     server_process.start()
     processes.append(server_process)
@@ -265,19 +373,26 @@ async def run_bot():
             if p.name == "server":
                 if p.exitcode == 0:
                     sys.exit(0)
-                if p.exitcode == 233:
-                    Logger.warning(f"Process {p.pid} (server) exited with code 233, restart all bots.")
+                if p.exitcode == 33:
+                    Logger.warning(f"Process {p.pid} (server) exited with code {p.exitcode}, restart all bots.")
                     raise RestartBot
                 Logger.critical(f"Process {p.pid} (server) exited with code {p.exitcode}, please check the log.")
                 sys.exit(p.exitcode)
+            if p.name == "jobqueue-hub":
+                Logger.critical(f"Process {p.pid} (jobqueue-hub) exited with code {p.exitcode}, please check the log.")
+                sys.exit(p.exitcode or 1)
             if p.exitcode == 0:
                 Logger.warning(f"Process {p.pid} ({p.name}) exited with code 0, abort to restart.")
                 processes.remove(p)
                 terminate_process(p)
                 break
-            if p.exitcode == 233:
-                Logger.warning(f"Process {p.pid} ({p.name}) exited with code 233, restart all bots.")
+            if p.exitcode == 33:
+                Logger.warning(f"Process {p.pid} ({p.name}) exited with code {p.exitcode}, restart all bots.")
                 raise RestartBot
+            if p.exitcode == 78:  # 已明确没有必要重启的进程异常退出码
+                processes.remove(p)
+                terminate_process(p)
+                break
             Logger.critical(f"Process {p.pid} ({p.name}) exited with code {p.exitcode}, please check the log.")
             processes.remove(p)
             terminate_process(p)
@@ -288,10 +403,45 @@ async def run_bot():
     sys.exit(1)
 
 
-def terminate_process(process: multiprocessing.Process):
-    process.kill()
-    process.join()
-    process.close()
+def terminate_process(
+    process: multiprocessing.Process,
+    graceful_event=None,
+    graceful_timeout: float = 10,
+):
+    """优先请求进程自行清理，超时后再逐级终止。"""
+    try:
+        if process.is_alive() and graceful_event is not None:
+            graceful_event.set()
+            process.join(graceful_timeout)
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+        if process.is_alive():
+            process.kill()
+            process.join()
+    finally:
+        process.close()
+
+
+def cleanup_processes():
+    global server_stop_event, jobqueue_hub_stop_event
+    # 先停止平台入口，再停止 Server；WebSocket Hub 最后退出，以便其它进程完成关闭信号与回包。
+    shutdown_order = {"server": 1, "jobqueue-hub": 2}
+    ordered_processes = sorted(processes, key=lambda ps: shutdown_order.get(ps.name, 0))
+    for ps in ordered_processes:
+        pid = ps.pid
+        name = ps.name
+        Logger.warning(f"Terminating process {pid} ({name})...")
+        try:
+            graceful_event = (
+                server_stop_event if name == "server" else jobqueue_hub_stop_event if name == "jobqueue-hub" else None
+            )
+            terminate_process(ps, graceful_event)
+        except Exception:
+            Logger.exception(f"Failed to terminate process {pid} ({name}) cleanly.")
+    processes.clear()
+    server_stop_event = None
+    jobqueue_hub_stop_event = None
 
 
 async def main_async():
@@ -299,22 +449,16 @@ async def main_async():
         multiprocess_run_until_complete(pre_init)
         await run_bot()  # Process will block here so
     except RestartBot as e:
-        for ps in processes:
-            Logger.warning(f"Terminating process {ps.pid} ({ps.name})...")
-            terminate_process(ps)
-        processes.clear()
+        cleanup_processes()
         raise e
     except (KeyboardInterrupt, SystemExit) as e:
-        for ps in processes:
-            terminate_process(ps)
-        processes.clear()
+        cleanup_processes()
         raise e
     except Exception as e:
         Logger.critical("An error occurred, please check the output.")
         traceback.print_exc()
+        cleanup_processes()
         raise e
-    finally:
-        await close_db()
 
 
 def main():
@@ -337,6 +481,7 @@ def main():
 
 
 if __name__ == "__main__":
+    init_daemon_logger()
     # Detect if the program is already running
     lock_file_path = Path("./.bot.lock").resolve()
     if sys.platform == "win32":

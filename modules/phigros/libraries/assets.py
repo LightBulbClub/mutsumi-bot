@@ -1,3 +1,4 @@
+import asyncio
 import re
 import shutil
 import string
@@ -22,6 +23,8 @@ ILLUSTRATION_URL = f"{RESOURCE_BASE}/illustrationLowRes/{{song_id}}.png"
 
 DIFF_NAMES = ("EZ", "HD", "IN", "AT")
 
+_asset_update_lock = asyncio.Lock()
+
 _PUNCTUATIONS = (
     "！？｡＂＃＄％＆＇（）＊＋，－／：；＜＝＞＠［＼］＾＿｀｛｜｝～、。〃〈〉《》「」『』"
     "【】〒〔〕〖〗〘〙〚〛〜・♫☆×♪↑↓²³ "
@@ -29,33 +32,15 @@ _PUNCTUATIONS = (
 
 
 def remove_punctuations(text: str) -> str:
-    """去除字符串中的标点与空白并转为小写。
-
-    仅用于用户输入的曲名匹配。曲目 id 与 7aGiven 的键天然一致，不需归一化。
-
-    :param text: 待处理的字符串。
-    """
     text = "".join(char for char in text if char not in string.punctuation and char not in _PUNCTUATIONS)
     return re.sub(" +", " ", text).strip().lower()
 
 
 def _rows(text: str) -> list[list[str]]:
-    """按制表符切分 TSV 文本。
-
-    不使用 csv 模块：曲名中可能含有引号，会被 csv 的引用规则误解。
-
-    :param text: TSV 文本。
-    """
     return [line.split("\t") for line in text.splitlines() if line.strip()]
 
 
 def parse_info_tsv(text: str) -> dict[str, dict]:
-    """解析 info.tsv。
-
-    每行为曲目 id、曲名、曲师、画师，其后为各难度谱师，列数在 4 至 7 之间浮动。
-
-    :param text: info.tsv 的文本内容。
-    """
     result = {}
     for row in _rows(text):
         if len(row) < 4:
@@ -72,8 +57,6 @@ def parse_info_tsv(text: str) -> dict[str, dict]:
 
 def parse_difficulty_tsv(text: str) -> dict[str, dict[str, float]]:
     """解析 difficulty.tsv。
-
-    每行为曲目 id 与各难度定数，难度数量随曲目而异。
 
     :param text: difficulty.tsv 的文本内容。
     """
@@ -94,11 +77,6 @@ def parse_difficulty_tsv(text: str) -> dict[str, dict[str, float]]:
 
 
 def build_song_info(info_text: str, diff_text: str) -> dict[str, dict]:
-    """合并两份 TSV 为曲目信息结构。
-
-    :param info_text: info.tsv 的文本内容。
-    :param diff_text: difficulty.tsv 的文本内容。
-    """
     songs = parse_info_tsv(info_text)
     for song_id, diff in parse_difficulty_tsv(diff_text).items():
         song = songs.setdefault(
@@ -123,12 +101,6 @@ def load_song_info() -> dict[str, dict]:
 
 
 def _as_constant(value) -> float:
-    """将定数取值转为浮点数，无法解析者视作该难度缺失。
-
-    5.1 之前的曲目信息将定数原样保留为字符串，缺失的难度写作 "-"，直接转换会中断整表构建。
-
-    :param value: 定数取值。
-    """
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -137,10 +109,6 @@ def _as_constant(value) -> float:
 
 def is_legacy_song_info(song_info: dict) -> bool:
     """判断曲目信息是否为 5.1 之前的旧版结构。
-
-    旧版以归一化后的小写曲目 id 为键，与存档中的原始 id 无法对应，即便定数容错也只会
-    得出全空的成绩，故须在使用前识别并要求重建。判据取旧版独有的 composer 字段与
-    字符串定数两项，命中其一即可认定。
 
     :param song_info: 曲目信息结构。
     """
@@ -154,9 +122,6 @@ def is_legacy_song_info(song_info: dict) -> bool:
 
 def to_difficulty_table(song_info: dict) -> dict[str, list[float]]:
     """转换为 countRks 所需的定数表。
-
-    countRks 以 EZ、HD、IN、AT、Legacy 的下标取值，故列表固定为五位；
-    缺失的难度补 0.0，避免其内部因 IndexError 输出告警。
 
     :param song_info: 曲目信息结构。
     """
@@ -192,17 +157,38 @@ def illustration_path(song_id: str) -> Path | None:
 
 
 def _local_version() -> str:
-    """读取本地记录的资源版本号。"""
     if not version_path.exists():
         return ""
     return version_path.read_text(encoding="utf-8").strip()
 
 
-async def _download_illustrations(song_ids: list[str]) -> None:
-    """下载缺失的曲绘。
+async def _remote_version() -> str:
+    value = await get_url(VERSION_URL, 200)
+    if not isinstance(value, str):
+        raise ValueError("Phigros resource version is not text.")
+    value = value.strip()
+    if not value:
+        raise ValueError("Phigros resource version is empty.")
+    return value
 
-    :param song_ids: 曲目 id 列表。
-    """
+
+def _load_valid_song_info() -> dict[str, dict] | None:
+    try:
+        if not song_info_exists():
+            return None
+        song_info = load_song_info()
+        if not isinstance(song_info, dict) or not song_info or is_legacy_song_info(song_info):
+            return None
+    except Exception:
+        return None
+    return song_info
+
+
+def _missing_illustrations(song_info: dict[str, dict]) -> bool:
+    return any(not (illustration_dir / f"{song_id}.png").exists() for song_id in song_info)
+
+
+async def _download_illustrations(song_ids: list[str]) -> None:
     illustration_dir.mkdir(parents=True, exist_ok=True)
     known = set(song_ids)
     # 旧版本按归一化的小写 id 命名，与新键无法对应；此处按新键集合清理，旧文件自然落入待删之列。
@@ -222,46 +208,75 @@ async def _download_illustrations(song_ids: list[str]) -> None:
             Logger.warning(f"Failed to download illustration for {song_id}.")
 
 
+async def _update_assets_locked(update_illustration: bool, remote_version: str) -> bool:
+    try:
+        song_info = _load_valid_song_info()
+        if remote_version == _local_version() and song_info is not None:
+            # 版本未变且元数据已就位时跳过重建，但仍执行曲绘补全，
+            # 以便修复上次中断留下的缺口。
+            Logger.info(f"Phigros resource already at version {remote_version}, skipping metadata rebuild.")
+        else:
+            info_text = await get_url(INFO_TSV_URL, 200)
+            diff_text = await get_url(DIFF_TSV_URL, 200)
+            song_info = build_song_info(info_text, diff_text)
+            if not song_info:
+                Logger.error("Fetched empty song info from remote resource.")
+                return False
+
+            pgr_assets_path.mkdir(parents=True, exist_ok=True)
+            temp_path = f"{random_cache_path()}.json"
+            with open(temp_path, "wb") as f:
+                f.write(orjson.dumps(song_info, option=orjson.OPT_INDENT_2))
+            shutil.move(temp_path, song_info_path)
+
+        if update_illustration:
+            await _download_illustrations(list(song_info))
+            Logger.success("Phigros illustrations download completed.")
+
+        pgr_assets_path.mkdir(parents=True, exist_ok=True)
+        version_path.write_text(remote_version, encoding="utf-8")
+        Logger.success(f"Phigros assets updated to version {remote_version}.")
+        return True
+    except Exception:
+        Logger.exception()
+        return False
+
+
 async def update_assets(update_illustration: bool = True) -> bool:
     """更新曲目信息与曲绘。
 
     :param update_illustration: 是否一并更新曲绘。
     :return: 是否更新成功。
     """
-    try:
-        remote_version = (await get_url(VERSION_URL, 200)).strip()
-    except Exception:
-        Logger.exception()
-        return False
-
-    # 版本闸门：版本未变且元数据已就位时跳过重建，但仍走一遍曲绘补全，
-    # 以便修复上次中断留下的缺口。
-    if remote_version and remote_version == _local_version() and song_info_exists():
-        Logger.info(f"Phigros resource already at version {remote_version}, skipping metadata rebuild.")
-        song_info = load_song_info()
-    else:
+    async with _asset_update_lock:
         try:
-            info_text = await get_url(INFO_TSV_URL, 200)
-            diff_text = await get_url(DIFF_TSV_URL, 200)
+            remote_version = await _remote_version()
+        except Exception:
+            Logger.exception()
+            return False
+        return await _update_assets_locked(update_illustration, remote_version)
+
+
+async def check_and_update_assets(update_illustration: bool = True) -> bool | None:
+    """检查远端资源版本并在需要时更新。
+
+    :param update_illustration: 是否一并更新曲绘。
+    :return: 执行更新的结果；无需更新时返回 ``None``。
+    """
+    async with _asset_update_lock:
+        try:
+            remote_version = await _remote_version()
         except Exception:
             Logger.exception()
             return False
 
-        song_info = build_song_info(info_text, diff_text)
-        if not song_info:
-            Logger.error("Fetched empty song info from remote resource.")
-            return False
+        song_info = _load_valid_song_info()
+        if (
+            remote_version == _local_version()
+            and song_info is not None
+            and (not update_illustration or not _missing_illustrations(song_info))
+        ):
+            Logger.debug(f"Phigros resource already at version {remote_version}.")
+            return None
 
-        pgr_assets_path.mkdir(parents=True, exist_ok=True)
-        temp_path = f"{random_cache_path()}.json"
-        with open(temp_path, "wb") as f:
-            f.write(orjson.dumps(song_info, option=orjson.OPT_INDENT_2))
-        shutil.move(temp_path, song_info_path)
-
-    if update_illustration:
-        await _download_illustrations(list(song_info))
-        Logger.success("Phigros illustrations download completed.")
-
-    version_path.write_text(remote_version, encoding="utf-8")
-    Logger.success(f"Phigros assets updated to version {remote_version}.")
-    return True
+        return await _update_assets_locked(update_illustration, remote_version)

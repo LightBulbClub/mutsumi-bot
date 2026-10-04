@@ -27,12 +27,15 @@ class CommandMatches(BaseMatches):
         target_from: str | None = None,
         show_required_superuser: bool = False,
         show_required_base_superuser: bool = False,
+        show_required_admin: bool = True,
     ) -> list[CommandMeta]:
         metas = []
         for meta in self.set:
             if not show_required_base_superuser and meta.required_base_superuser:
                 continue
             if not show_required_superuser and meta.required_superuser:
+                continue
+            if not show_required_admin and meta.required_admin:
                 continue
             if not meta.load:
                 continue
@@ -60,12 +63,15 @@ class RegexMatches(BaseMatches):
         target_from: str | None = None,
         show_required_superuser: bool = False,
         show_required_base_superuser: bool = False,
+        show_required_admin: bool = True,
     ) -> list[RegexMeta]:
         metas = []
         for meta in self.set:
             if not show_required_base_superuser and meta.required_base_superuser:
                 continue
             if not show_required_superuser and meta.required_superuser:
+                continue
+            if not show_required_admin and meta.required_admin:
                 continue
             if not meta.load:
                 continue
@@ -94,4 +100,27 @@ class HookMatches(BaseMatches):
     set: list[HookMeta] = field(factory=list)
 
 
-__all__ = ["CommandMatches", "RegexMatches", "ScheduleMatches", "HookMatches"]
+@define
+class EventMatches(BaseMatches):
+    set: list[EventMeta] = field(factory=list)
+
+    def get(self, target_from: str | None = None) -> list[EventMeta]:
+        metas = []
+        for meta in self.set:
+            if not meta.load:
+                continue
+            if target_from:
+                client_name = target_from.split("|")[0]
+                if target_from in meta.exclude_from or client_name in meta.exclude_from:
+                    continue
+                if (
+                    target_from not in meta.available_for
+                    and client_name not in meta.available_for
+                    and "*" not in meta.available_for
+                ):
+                    continue
+            metas.append(meta)
+        return metas
+
+
+__all__ = ["CommandMatches", "RegexMatches", "ScheduleMatches", "HookMatches", "EventMatches"]

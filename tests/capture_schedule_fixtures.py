@@ -1,17 +1,4 @@
-"""定时任务语料捕获工具。
-
-定时任务不经由消息解析触发，普通的集成测试录制流程覆盖不到它们依赖的外部请求。
-此脚本直接触发各模块的 schedule 函数，把途中的 HTTP 响应与 WebRender 取源结果
-分别录入 tests/fixtures/http/ 与 tests/fixtures/webrender/。
-
-WebRender 依赖无头浏览器，录制阶段无法真正渲染，故以普通 HTTP 抓取同一 URL 的
-响应代替。对必须执行脚本才能出内容的页面，抓取结果与真实渲染并不等价，此时应改为
-手工编写最小语料。
-
-使用方式：
-    python tests/capture_schedule_fixtures.py                  # 录制全部可录制的任务
-    python tests/capture_schedule_fixtures.py arcaea_rss ...   # 只录制指定模块
-"""
+"""定时任务语料捕获工具。"""
 
 import asyncio
 import json
@@ -30,11 +17,11 @@ from core.tester.mock.webrender import save_webrender_fixture
 # 这些模块的定时任务无法在录制环境中产生有效语料，跳过以免徒劳等待。
 SKIPPED = {
     # 多页抓取叠加图片渲染，单次运行耗时过长，不适合纳入测试。
-    "weekly_rss": "抓取页数多且需图片渲染，耗时过长",
+    "weekly-rss": "抓取页数多且需图片渲染，耗时过长",
     # 依赖 Google Play 抓取，且在 ip_country 未配置时直接早退。
-    "mcbv_rss": "依赖 Google Play 抓取，测试环境直接早退",
+    "mcbv-rss": "依赖 Google Play 抓取，测试环境直接早退",
     # 需要真实 wiki 机器人账号凭据。
-    "wiki_bot": "需要真实 wiki 账号凭据",
+    "wiki-bot": "需要真实 wiki 账号凭据",
 }
 
 _http: dict[tuple, dict] = {}
@@ -63,7 +50,7 @@ async def main():
     await load_modules(show_logs=False, monkey_patches={"Random": Random()}, load_fixtures=False)
 
     import core.utils.http as http_module
-    from core.web_render import web_render
+    from core.utils.web_render import web_render
 
     original_request = http_module.request_url
     original_source = web_render.source

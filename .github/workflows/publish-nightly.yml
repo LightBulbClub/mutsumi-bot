@@ -19,14 +19,13 @@ jobs:
 
       - name: Write version file
         run: |
-          mkdir -p assets/private/default
-          echo "nightly-v$(date +'%Y%m%d')" > assets/private/default/.version
-          cat assets/private/default/.version
+          echo "nightly-v$(date +'%Y%m%d')" > assets/.version
+          cat assets/.version
 
       - name: Package code
         run: |
           ZIP_NAME="AkariBot-nightly.zip"
-          zip -r "$ZIP_NAME" . -x '*.git*'
+          zip -r "$ZIP_NAME" . -x '*.git*' 'tests/*' 'tests/**'
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7

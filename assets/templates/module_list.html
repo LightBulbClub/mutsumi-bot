@@ -46,7 +46,9 @@
 
         .grid-container {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            grid-template-columns: repeat(5, 120px);
+            justify-content: start;
+            gap: 12px;
         }
 
         .grid-item {
@@ -55,7 +57,7 @@
             flex-direction: column;
             align-items: center;
             padding: 3px;
-            border-radius: var(--mdui-shape-corner-large);
+            border-radius: 16px;
             height: 90px;
             width: 120px;
             text-align: center;
@@ -68,30 +70,35 @@
             word-break: break-all;
             white-space: normal;
             background-color: transparent;
-            /* box-shadow: 3px 3px 8px rgba(0, 0, 0, 0.2); */
             }
 
         .base {
-            background-color: rgb(var(--mdui-color-tertiary-container));
-            color: rgb(var(--mdui-color-tertiary));
-            box-shadow: var(--mdui-elevation-level1);
+            background-color: #ffe0cc;
+            color: #8c3a00;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 1px 3px 1px rgba(0, 0, 0, 0.15);
         }
 
         .external {
-            background-color: rgb(var(--mdui-color-secondary-container));
-            color: rgb(var(--mdui-color-secondary));
-            box-shadow: var(--mdui-elevation-level1);
+            background-color: #cce5ff;
+            color: #003d66;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 1px 3px 1px rgba(0, 0, 0, 0.15);
+        }
+
+        .subscription {
+            background-color: #e8f5e9;
+            color: #1b5e20;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 1px 3px 1px rgba(0, 0, 0, 0.15);
         }
 
         .disabled {
-            background-color: rgb(var(--mdui-color-surface-container));
-            color: rgb(var(--mdui-color-on-surface));
-            box-shadow: var(--mdui-elevation-level1);
+            background-color: #d5d5d5;
+            color: #1c1c1c;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 1px 3px 1px rgba(0, 0, 0, 0.15);
         }
 
         .dev {
             font-style: italic;
-            border: 1px solid rgb(var(--mdui-color-outline));
+            border: 1px solid #74777f;
         }
 
         .admin {
@@ -109,6 +116,47 @@
             white-space: pre-line;
             line-height: 1.5;
         }
+
+        .module-type-legend {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 8px 18px;
+            margin: 8px 0;
+            font-size: 14px;
+        }
+
+        .module-type-legend-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            white-space: nowrap;
+        }
+
+        .module-type-legend-swatch {
+            width: 14px;
+            height: 14px;
+            box-sizing: border-box;
+            border: 1px solid rgba(0, 0, 0, 0.25);
+            border-radius: 3px;
+        }
+
+        .module-type-legend-base {
+            background-color: #ffe0cc;
+        }
+
+        .module-type-legend-external {
+            background-color: #cce5ff;
+        }
+
+        .module-type-legend-subscription {
+            background-color: #e8f5e9;
+        }
+
+        .module-type-legend-disabled {
+            background-color: #d5d5d5;
+        }
+
         .mdui-prose :first-child {
             margin-top: 5px;
         }
@@ -124,13 +172,18 @@
         <div class="content-layout">
         <h2>{{ locale.t("core.message.module.list.header") }}</h2>
         <hr>
-        <div class="grid-container">
-            {% for key, value in module_list.items() %}
-            <div class="grid-item{{ ' dev' if value.required_superuser or value.required_base_superuser else '' }}{{ ' disabled' if show_disabled_modules and key not in target_enabled_list and not (value.base or value.required_superuser or value.required_base_superuser) else (' base' if value.base else ' external') }}">
+        {% for title_key, group_class, group_modules in module_groups %}
+        {% if group_modules %}
+        <section class="module-group {{ group_class }}-group">
+            <h3 class="module-group-title">{{ locale.t(title_key) }}</h3>
+            <div class="grid-container">
+            {% for key, value in group_modules.items() %}
+            <div class="grid-item {{ group_class }}{{ ' dev' if value.required_superuser or value.required_base_superuser else '' }}{{ ' disabled' if show_disabled_modules and key not in target_enabled_list and not (value.base or value.required_superuser or value.required_base_superuser) else '' }}">
                 <div class="{% if not (value.required_superuser or value.required_base_superuser) %}{{ 'admin' if value.required_admin else '' }}{% endif %}">
-                    {% set help_=CommandParser(module_list[key], msg=msg, module_name=module_list[key].module_name,
-                                  command_prefixes=msg.session_info.prefixes, is_superuser=is_superuser) %}
-                    {% set regex_list=value.regex_list.get(msg.session_info.target_from, show_required_superuser=is_superuser, show_required_base_superuser=is_base_superuser) %}
+                    {% set help_=CommandParser(value, msg=msg, module_name=value.module_name,
+                                  command_prefixes=msg.session_info.prefixes, is_superuser=is_superuser,
+                                  is_admin=is_admin) %}
+                    {% set regex_list=value.regex_list.get(msg.session_info.target_from, show_required_superuser=is_superuser, show_required_base_superuser=is_base_superuser, show_required_admin=is_admin) %}
                     <div class="module-name">{{ value.module_name | e }}</div>
                     {% if len(help_.args) > 0 %}
                     <div>{{ locale.t('core.message.help.command_count', count=len(help_.args)) }}</div>
@@ -141,8 +194,31 @@
                 </div>
             </div>
             {%- endfor %}
-        </div>
+            </div>
+        </section>
+        {% endif %}
+        {% endfor %}
         <hr>
+            <div class="module-type-legend">
+                <span class="module-type-legend-item">
+                    <span class="module-type-legend-swatch module-type-legend-base" aria-hidden="true"></span>
+                    {{ locale.t('core.message.help.table.base') }}
+                </span>
+                <span class="module-type-legend-item">
+                    <span class="module-type-legend-swatch module-type-legend-external" aria-hidden="true"></span>
+                    {{ locale.t('core.message.help.table.external') }}
+                </span>
+                <span class="module-type-legend-item">
+                    <span class="module-type-legend-swatch module-type-legend-subscription" aria-hidden="true"></span>
+                    {{ locale.t('core.message.help.table.subscription') }}
+                </span>
+                {% if show_disabled_modules %}
+                <span class="module-type-legend-item">
+                    <span class="module-type-legend-swatch module-type-legend-disabled" aria-hidden="true"></span>
+                    {{ locale.t('core.message.help.table.disabled') }}
+                </span>
+                {% endif %}
+            </div>
             <div class="footer">
                 {{ locale.t('core.message.help.prompt', prefix=msg.session_info.prefixes[0]) }}
             </div>

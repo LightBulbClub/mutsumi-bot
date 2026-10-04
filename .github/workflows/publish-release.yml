@@ -4,6 +4,7 @@ permissions:
   contents: write
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - 'v*'
@@ -23,14 +24,13 @@ jobs:
 
       - name: Write version file
         run: |
-          mkdir -p assets/private/default
-          echo "$TAG_NAME" > assets/private/default/.version
-          cat assets/private/default/.version
+          echo "$TAG_NAME" > assets/.version
+          cat assets/.version
 
       - name: Package code
         run: |
           ZIP_NAME="AkariBot-$TAG_NAME.zip"
-          zip -r "$ZIP_NAME" . -x '*.git*'
+          zip -r "$ZIP_NAME" . -x '*.git*' 'tests/*' 'tests/**'
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
 
       - name: Upload artifact

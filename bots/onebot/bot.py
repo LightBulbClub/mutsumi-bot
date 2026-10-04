@@ -1,4 +1,3 @@
-import asyncio
 import html
 import logging
 import re
@@ -9,6 +8,7 @@ from aiocqhttp import Event
 from hypercorn import Config as HyperConfig
 
 from bots.onebot.client import aiocqhttp_bot
+from bots.onebot.config import AiocqhttpConfig
 from bots.onebot.context import OneBotContextManager, OneBotFetchedContextManager
 from bots.onebot.info import *
 from bots.onebot.utils import to_message_chain, get_onebot_implementation
@@ -18,15 +18,14 @@ from core.builtins.message.internal import Plain
 from core.builtins.session.info import SessionInfo
 from core.builtins.temp import Temp
 from core.builtins.utils import command_prefix
-from core.client.init import client_init
-from bots.onebot.config import AiocqhttpConfig
+from core.client.init import client_cleanup, client_init
 from core.config.base import BaseConfig, CoreConfig
 from core.constants.default import confirm_command_default
 from core.database.models import SenderUnionInfo, TargetUnionInfo, UnfriendlyActionRecords
 from core.i18n import Locale
 from core.logger import Logger
-from core.retired import is_retired_client
-from core.tos import tos_report
+from core.queue.contracts import ServerAPI
+from core.utils.retired import is_retired_client
 
 Bot.register_bot(client_name=client_name)
 ctx_id = Bot.register_context_manager(OneBotContextManager)
@@ -48,11 +47,37 @@ enable_listening_self_message = AiocqhttpConfig.qq_enable_listening_self_message
 qq_account = None
 
 
+async def _tos_report(sender: str, target: str, reason: str, banned: bool = False):
+    try:
+        return await ServerAPI.trigger_hook(
+            "tos.report",
+            session_info=None,
+            sender=sender,
+            target=target,
+            reason=reason,
+            banned=banned,
+        )
+    except Exception:
+        Logger.exception(f"tos.report hook failed; report dropped (sender={sender}, target={target}).")
+        return None
+
+
 @aiocqhttp_bot.on_startup
 async def startup():
     await client_init(target_prefix_list, sender_prefix_list)
-    asyncio.create_task(OneBotFetchedContextManager.process_tasks())
+    OneBotFetchedContextManager.start_task_processor()
     aiocqhttp_bot.logger.setLevel(logging.WARNING)
+
+
+@aiocqhttp_bot.server_app.after_serving
+async def shutdown():
+    try:
+        await OneBotFetchedContextManager.stop_task_processor()
+    finally:
+        try:
+            await OneBotContextManager.shutdown()
+        finally:
+            await client_cleanup()
 
 
 @aiocqhttp_bot.on_websocket_connection
@@ -60,7 +85,7 @@ async def _(event: Event):
     qq_login_info = await aiocqhttp_bot.call_action("get_login_info")
     global qq_account
     qq_account = qq_login_info.get("user_id")
-    Temp.data["qq_account"] = str(qq_account)
+    Temp.data["qq_account"] = str(qq_account) if qq_account is not None else None
     Temp.data["qq_nickname"] = qq_login_info.get("nickname")
     Temp.data["onebot_impl"] = await get_onebot_implementation()
 
@@ -149,11 +174,11 @@ async def message_handler(event: Event):
         sender_name=sender_name,
         client_name=client_name,
         message_id=str(event.message_id),
-        reply_id=str(reply_id),
+        reply_id=str(reply_id) if reply_id is not None else None,
         messages=msg_chain,
         ctx_slot=ctx_id,
         tmp=Temp.data.copy(),
-        bot_id=str(qq_account),
+        bot_id=str(qq_account) if qq_account is not None else None,
     )
 
     await Bot.process_message(session, event)
@@ -215,7 +240,7 @@ async def _(event: Event):
             reply_id=str(event.message_id),
             messages=MessageChain.assign([Plain(emoji_)]),
             ctx_slot=ctx_id,
-            bot_id=str(qq_account),
+            bot_id=str(qq_account) if qq_account is not None else None,
         )
 
         await Bot.process_message(session, event)
@@ -272,7 +297,7 @@ async def _(event: Event):
             Logger.info(f"Ban {sender_id} ({target_id}) by ToS: restrict")
             Logger.info(f"Block {target_id} by ToS: restrict")
             reason = Locale(default_locale).t("tos.message.reason.restrict")
-            await tos_report(sender_id, target_id, reason, banned=True)
+            await _tos_report(sender_id, target_id, reason, banned=True)
             await target_union_info.edit_attr("blocked", True)
             await aiocqhttp_bot.call_action("set_group_leave", group_id=event.group_id)
             await sender_union_info.switch_identity(trust=False)
@@ -299,7 +324,7 @@ async def _(event: Event):
             Logger.info(f"Ban {sender_id} ({target_id}) by ToS: kick")
             Logger.info(f"Block {target_id} by ToS: kick")
             reason = Locale(default_locale).t("tos.message.reason.kick")
-            await tos_report(sender_id, target_id, reason, banned=True)
+            await _tos_report(sender_id, target_id, reason, banned=True)
             await target_union_info.edit_attr("blocked", True)
             await sender_union_info.switch_identity(trust=False)
             await aiocqhttp_bot.call_action("delete_friend", friend_id=event.operator_id)

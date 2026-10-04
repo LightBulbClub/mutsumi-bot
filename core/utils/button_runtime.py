@@ -1,38 +1,33 @@
 """跨平台按钮 token 的注册与消费。"""
 
-import re
-import secrets
 import time
 from enum import Enum, auto
-from typing import Any
 
 from attrs import define
-import orjson
 
+from core.builtins.message.elements import ButtonPermission, ButtonRows
 from core.builtins.utils import confirm_command_default
+from core.utils.random import SecureRandom
 
 BUTTON_TOKEN_PREFIX = "akb:"
 BUTTON_EXPIRES = 3600
-_CALLBACK_PATTERN = re.compile(r"<q:(.*?)>(.*)", re.DOTALL)
 
 
 @define
 class ButtonState:
-    """按钮 token 对应的运行时状态。"""
-
     payload: str
     reply_id: str | None
-    allowed_sender_id: str
+    allowed_sender_id: str | None
     created_at: float
-    used: bool = False
+    click_limit: int | None = 1
+    click_count: int = 0
 
 
 @define(frozen=True)
 class RegisteredButton:
-    """供平台渲染的按钮。"""
-
     label: str
-    token: str
+    token: str | None = None
+    url: str | None = None
 
 
 class ButtonConsumeStatus(Enum):
@@ -47,11 +42,10 @@ class ButtonConsumeStatus(Enum):
 
 @define(frozen=True)
 class ButtonConsumeResult:
-    """按钮消费后的数据。"""
-
     status: ButtonConsumeStatus
     payload: str | None = None
     reply_id: str | None = None
+    exhausted: bool = False
 
 
 _button_registry: dict[str, ButtonState] = {}
@@ -59,45 +53,12 @@ _button_registry: dict[str, ButtonState] = {}
 
 def _generate_token() -> str:
     while True:
-        token = BUTTON_TOKEN_PREFIX + secrets.token_urlsafe(9)
+        token = BUTTON_TOKEN_PREFIX + SecureRandom.token_urlsafe(9)
         if token not in _button_registry:
             return token
 
 
-def _split_payload(data: str) -> tuple[str | None, str]:
-    if match := _CALLBACK_PATTERN.fullmatch(data):
-        return match.group(1), match.group(2)
-    return None, data
-
-
-def _decode_button_data(data: str | None) -> list[dict[str, str]]:
-    if not data:
-        return []
-    try:
-        decoded = orjson.loads(data)
-    except orjson.JSONDecodeError:
-        return []
-    if not isinstance(decoded, list):
-        return []
-    return [row for row in decoded if isinstance(row, dict)]
-
-
-def get_session_button_data(session_info: Any) -> list[dict[str, str]]:
-    """根据会话临时状态取得最终按钮数据。"""
-    tmp = session_info.tmp
-    if tmp.get("wait_type") == "wait_confirm" and tmp.get("wait_active") == "yes":
-        return [
-            {
-                session_info.locale.t("message.yes"): "confirm_yes",
-                session_info.locale.t("message.no"): "confirm_no",
-            }
-        ]
-    if tmp.get("wait_type") == "wait_next_message" and tmp.get("wait_active") == "yes":
-        return _decode_button_data(tmp.get("wait_possibly_choices"))
-    return _decode_button_data(tmp.get("button_data"))
-
-
-def register_button_rows(button_data: list[dict[str, str]], allowed_sender_id: str) -> list[list[RegisteredButton]]:
+def register_button_rows(button_rows: list[ButtonRows], allowed_sender_id: str) -> list[list[RegisteredButton]]:
     """注册按钮行并返回平台可用的短 token。"""
     now = time.time()
     expired_tokens = [token for token, state in _button_registry.items() if now - state.created_at > BUTTON_EXPIRES]
@@ -105,18 +66,22 @@ def register_button_rows(button_data: list[dict[str, str]], allowed_sender_id: s
         del _button_registry[token]
 
     registered_rows = []
-    for row in button_data:
+    for row in button_rows:
         registered_row = []
-        for label, data in row.items():
-            reply_id, payload = _split_payload(data)
+        for button in row.buttons:
+            payload = button.payload
+            if payload.value.startswith(("http://", "https://")):
+                registered_row.append(RegisteredButton(label=button.show, url=payload.value))
+                continue
             token = _generate_token()
             _button_registry[token] = ButtonState(
-                payload=payload,
-                reply_id=reply_id,
-                allowed_sender_id=allowed_sender_id,
+                payload=payload.value,
+                reply_id=payload.reply_id,
+                allowed_sender_id=(None if payload.permission is ButtonPermission.ALL else allowed_sender_id),
                 created_at=now,
+                click_limit=payload.click_limit,
             )
-            registered_row.append(RegisteredButton(label=label, token=token))
+            registered_row.append(RegisteredButton(label=button.show, token=token))
         if registered_row:
             registered_rows.append(registered_row)
     return registered_rows
@@ -132,13 +97,18 @@ def consume_button(token: str, sender_id: str, now: float | None = None) -> Butt
     if current_time - state.created_at > BUTTON_EXPIRES:
         del _button_registry[token]
         return ButtonConsumeResult(ButtonConsumeStatus.EXPIRED)
-    if state.allowed_sender_id != sender_id:
+    if state.allowed_sender_id is not None and state.allowed_sender_id != sender_id:
         return ButtonConsumeResult(ButtonConsumeStatus.FORBIDDEN)
-    if state.used:
+    if state.click_limit is not None and state.click_count >= state.click_limit:
         return ButtonConsumeResult(ButtonConsumeStatus.USED)
 
-    state.used = True
-    return ButtonConsumeResult(ButtonConsumeStatus.SUCCESS, state.payload, state.reply_id)
+    state.click_count += 1
+    return ButtonConsumeResult(
+        ButtonConsumeStatus.SUCCESS,
+        state.payload,
+        state.reply_id,
+        exhausted=state.click_limit is not None and state.click_count >= state.click_limit,
+    )
 
 
 def normalize_button_payload(payload: str) -> str:
@@ -151,5 +121,4 @@ def normalize_button_payload(payload: str) -> str:
 
 
 def _clear_button_registry() -> None:
-    """清空按钮注册表，仅供测试隔离。"""
     _button_registry.clear()
